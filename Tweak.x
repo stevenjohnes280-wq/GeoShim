@@ -70,7 +70,89 @@ static void gs_installDaemonHook(void) {
     }
     gEncodeWithCoderOrig = method_getImplementation(m);
     method_setImplementation(m, (IMP)gs_encodeWithCoder);
-    GSLog(@"locationd: encodeWithCoder: hook installed");
+    GSLog(@"locationd: CLLocation encodeWithCoder: hook installed");
+}
+
+#pragma mark - CLVisit hook (locationd)
+
+// CLVisit carries its own coordinate and is delivered by the same keyed-archive
+// path, so a visit-monitoring app would otherwise see the real place. We rewrite
+// the coordinate on a *copy* (never mutating the daemon's own object) and encode
+// that. CLVisit has no public initializer, so we reach the coordinate through
+// its ivar; the offset is discovered at load and the hook is not installed at
+// all if the layout is not what we expect (fail closed -> real visit encoded).
+static IMP gVisitEncodeOrig = NULL;
+static ptrdiff_t gVisitCoordOffset = -1;              // CLLocationCoordinate2D
+static ptrdiff_t gVisitLatOffset = -1, gVisitLonOffset = -1;  // fallback: 2 doubles
+
+static void gs_visitEncodeWithCoder(id self, SEL _cmd, NSCoder *coder) {
+    @try {
+        GSLocationFactory *factory = [GSLocationFactory shared];
+        if (factory.active && [self isKindOfClass:[CLVisit class]]) {
+            CLLocation *fake = [factory spoofedLocationFromReal:nil];
+            if (fake && CLLocationCoordinate2DIsValid(fake.coordinate)) {
+                CLVisit *copy = [(CLVisit *)self copy];
+                if (copy) {
+                    uint8_t *base = (uint8_t *)(__bridge void *)copy;
+                    BOOL wrote = NO;
+                    if (gVisitCoordOffset >= 0) {
+                        *(CLLocationCoordinate2D *)(base + gVisitCoordOffset) = fake.coordinate;
+                        wrote = YES;
+                    } else if (gVisitLatOffset >= 0 && gVisitLonOffset >= 0) {
+                        *(double *)(base + gVisitLatOffset) = fake.coordinate.latitude;
+                        *(double *)(base + gVisitLonOffset) = fake.coordinate.longitude;
+                        wrote = YES;
+                    }
+                    if (wrote && gVisitEncodeOrig) {
+                        if (GEOSHIM_DEBUG_BUILD) {
+                            GSLog(@"locationd: visit -> %f,%f",
+                                  fake.coordinate.latitude, fake.coordinate.longitude);
+                        }
+                        ((void (*)(id, SEL, NSCoder *))gVisitEncodeOrig)(copy, _cmd, coder);
+                        return;
+                    }
+                }
+            }
+        }
+    } @catch (NSException *e) {
+        GSLog(@"locationd: CLVisit encode substitution failed: %@", e);
+    }
+
+    if (gVisitEncodeOrig) {
+        ((void (*)(id, SEL, NSCoder *))gVisitEncodeOrig)(self, _cmd, coder);
+    }
+}
+
+static void gs_installVisitHook(void) {
+    Class c = [CLVisit class];
+    if (!c) return;
+
+    Ivar coord = class_getInstanceVariable(c, "_coordinate");
+    if (coord) {
+        gVisitCoordOffset = ivar_getOffset(coord);
+    } else {
+        Ivar la = class_getInstanceVariable(c, "_latitude");
+        Ivar lo = class_getInstanceVariable(c, "_longitude");
+        if (la && lo) {
+            gVisitLatOffset = ivar_getOffset(la);
+            gVisitLonOffset = ivar_getOffset(lo);
+        }
+    }
+
+    if (gVisitCoordOffset < 0 && (gVisitLatOffset < 0 || gVisitLonOffset < 0)) {
+        GSLog(@"locationd: CLVisit coordinate ivar not found; visits left unspoofed");
+        return;
+    }
+
+    Method m = class_getInstanceMethod(c, @selector(encodeWithCoder:));
+    if (!m) {
+        GSLog(@"locationd: CLVisit has no encodeWithCoder:; visit hook not installed");
+        return;
+    }
+    gVisitEncodeOrig = method_getImplementation(m);
+    method_setImplementation(m, (IMP)gs_visitEncodeWithCoder);
+    GSLog(@"locationd: CLVisit encodeWithCoder: hook installed (coordOffset=%ld latOffset=%ld)",
+          (long)gVisitCoordOffset, (long)gVisitLatOffset);
 }
 
 #pragma mark - Process guard
@@ -110,6 +192,7 @@ static void gs_prefsChanged(CFNotificationCenterRef center, void *observer,
                                         NULL, CFNotificationSuspensionBehaviorCoalesce);
 
         gs_installDaemonHook();
+        gs_installVisitHook();
 
         GSConfig *config = [GSConfig current];
         GSLog(@"loaded in locationd (enabled=%d mode=%ld srcinfo=%ld strategy=%@)",
