@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="geoshim" xmlns="http://www.topografix.com/GPX/1/1">
+  <!-- A roughly 900 m walking loop near Tokyo Station, for smoke-testing
+       route mode. At the default 1.4 m/s one pass takes about 11 minutes. -->
+  <trk>
+    <name>tokyo-loop</name>
+    <trkseg>
+      <trkpt lat="35.681200" lon="139.767100"/>
+      <trkpt lat="35.681210" lon="139.768400"/>
+      <trkpt lat="35.681250" lon="139.769700"/>
+      <trkpt lat="35.681400" lon="139.770900"/>
+      <trkpt lat="35.682100" lon="139.771000"/>
+      <trkpt lat="35.682900" lon="139.770950"/>
+      <trkpt lat="35.683400" lon="139.770100"/>
+      <trkpt lat="35.683450" lon="139.768800"/>
+      <trkpt lat="35.683400" lon="139.767500"/>
+      <trkpt lat="35.682900" lon="139.766900"/>
+      <trkpt lat="35.682100" lon="139.766850"/>
+      <trkpt lat="35.681500" lon="139.766900"/>
+      <trkpt lat="35.681200" lon="139.767100"/>
+    </trkseg>
+  </trk>
+</gpx>

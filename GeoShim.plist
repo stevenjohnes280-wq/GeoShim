@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Filter</key>
+  <dict>
+    <!-- locationd only. It reaches every location client - including apps whose
+         own injection is blacklisted by roothide - because they all get their
+         positions from the daemon over XPC. Requires /usr/libexec/locationd to
+         be injectable (it is not on roothide's tweak-injection exclusion list). -->
+    <key>Executables</key>
+    <array>
+      <string>locationd</string>
+    </array>
+  </dict>
+</dict>
+</plist>
