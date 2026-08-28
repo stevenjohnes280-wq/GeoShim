@@ -1,39 +1,91 @@
 # GeoShim
 
-An iOS tweak that substitutes locations **in process**, inside CoreLocation, rather than
-through `locationd`'s simulation channel.
+A jailbreak tweak that spoofs iOS location **system-wide by hooking `locationd`**, the
+system location daemon — not the individual apps.
 
-That distinction is the whole point. Tools built on `CLSimulationManager` (Xcode's DDI,
-`locsim`) deliver through the path iOS marks as simulated, so on iOS 15 and later every
-`CLLocation` they produce reports `sourceInformation.isSimulatedBySoftware == YES` to
-any app that asks — a public, documented API. GeoShim constructs the `CLLocation`
-objects itself and therefore controls that property.
+That is the whole point. The usual location fakers hook CoreLocation *inside each app*,
+which fails against an app you cannot inject into. Under roothide you can **blacklist**
+an app so no tweak dylib is loaded into it (to hide the jailbreak). But every app still
+gets its position from `locationd` over XPC — so hooking the daemon reaches the
+blacklisted app anyway. `locationd` is the one interception point that works against a
+process you cannot touch, and it is the reason this project exists.
 
-It hooks in **two places**:
+It also cleanly defeats `sourceInformation.isSimulatedBySoftware`: tools built on
+`CLSimulationManager` (Xcode's DDI, `locsim`) deliver through the channel iOS marks as
+simulated, so on iOS 15+ every `CLLocation` they produce reports `isSimulatedBySoftware
+== YES` to any app that checks. GeoShim constructs the `CLLocation` objects itself, so it
+controls that property.
 
-1. **In the app** — the CoreLocation client hooks, for apps that let tweaks inject.
-2. **In `locationd`** — the location daemon, for apps that *don't*. Under roothide, an
-   app can be blacklisted so no tweak dylib is injected into it. Those apps still get
-   their positions from `locationd` over XPC, so hooking the daemon reaches them anyway.
-   This is the only interception point that works against a blacklisted app.
+**Target:** iOS 15.8.2, **Dopamine2‑roothide** (ElleKit / systemhook), `arm64e`.
+Package `xyz.regulad.geoshim`. Paths are resolved at runtime with `jbroot()`; nothing
+hardcodes the randomized jailbreak root.
 
-Target: **iOS 15.8.2, roothide** (roothide Bootstrap / Dopamine-roothide), ElleKit.
-Package identifier `xyz.regulad.geoshim`. Paths are resolved at runtime with `jbroot()`;
-nothing hardcodes the randomized jailbreak root.
+**Status: confirmed working on-device.** The daemon-only build spoofs a
+roothide‑blacklisted app's location on iOS 15.8.2 / Dopamine2‑roothide, verified in the
+log by `locationd: encode <real> -> <fake>`.
 
 ---
 
-## Status
+## How it works
 
-Phase 1 and Phase 2 are implemented, plus the locationd interceptor. Everything builds
-clean (zero warnings) under the **roothide** package scheme for `iphoneos-arm64e`
-against the iOS 16.5 SDK with a 15.0 deployment target.
+GeoShim injects **only into `locationd`** (the filter targets the `locationd` executable;
+the `%ctor` installs nothing and returns immediately in any other process). Inside the
+daemon it hooks the two points where an outbound, location-bearing object is serialized to
+a client.
 
-**Nothing here has been run on a device yet.** The compile is verified; the runtime is
-not. The locationd path in particular rests on two device-only assumptions — read
-[Open VERIFY items](#open-verify-items) before trusting it — and daemon injection on
-iOS 15 is itself the biggest unknown. Work through [Verification](#verification) in
-order.
+Positions leave `locationd` as an **NSSecureCoding keyed archive over XPC** (`bplist17`,
+confirmed by [8kSec's Frida teardown](https://8ksec.io/advanced-frida-usage-part-4-sniffing-location-data-from-locationd-in-ios/)
+and on-device here), so the serializer is the chokepoint:
+
+- **`-[CLLocation encodeWithCoder:]`** — the main path. Rather than guess the archive's
+  key names, GeoShim replaces the *object* being encoded: it builds a fully spoofed
+  `CLLocation` and runs the original encoder against that. Whatever keys `CLLocation`
+  normally writes, it writes for the fake. Objects with an invalid coordinate are left
+  alone; anything that throws falls through to the real encode.
+- **`-[CLVisit encodeWithCoder:]`** — `CLVisit` carries its own coordinate and rides the
+  same path, so a visit-monitoring app would otherwise see the real place. GeoShim
+  rewrites the coordinate on a *copy* (never mutating the daemon's own object), reaching
+  it through the `CLVisit` coordinate ivar since the class has no public initializer. The
+  ivar offset is discovered at load; if the layout is unexpected the hook is simply not
+  installed (fail closed — the real visit is encoded).
+
+Everything fails **open**: any nil/throw path encodes the real object untouched. A crash
+here is a crash in `locationd`, so every hook is nil-checked and wrapped.
+
+### Making the fix look real
+
+`GSLocationFactory` populates every field per delivery rather than leaving placeholders:
+
+- coordinate jittered by a Gaussian ±`JitterMetres` (metres → degrees, latitude-corrected,
+  `cos(lat)` clamped near the poles)
+- `horizontalAccuracy` a random walk over 5–65 m, `verticalAccuracy` over 3–10 m — a walk,
+  not a constant and not uniform noise, because that is how a receiver behaves as its
+  solution firms up or degrades
+- `speed` 0 ± small noise when stationary, derived from the polyline when moving;
+  `speedAccuracy` a small positive value, never −1
+- `course` −1 when stationary, the segment bearing when moving (blended across vertices,
+  not snapped); `courseAccuracy` positive only when the course is valid
+- `altitude` from config ± 0.5 m; `timestamp` is `[NSDate date]` at delivery
+
+Route mode advances a distance cursor by `speed × elapsed` along the cumulative haversine
+polyline, varies speed ±10%, and eases through sharp turns.
+
+### `sourceInformation`
+
+`SourceInfoMode` selects how the property reads, so you can A/B it against a target:
+
+- **`nil`** (default) — the public initializer, so the property is `nil`. This is what any
+  ordinary `CLLocation` looks like, and it needs no private API.
+- **`clean`** — attaches `[[CLLocationSourceInformation alloc]
+  initWithSoftwareSimulationState:NO andExternalAccessoryState:NO]`. That initializer is
+  **public**, declared in `CLLocation.h` since iOS 15.0.
+- **`passthrough`** — copies whatever the last genuine fix reported.
+
+Attaching the object is the one part with no public answer. Two strategies, resolved once
+and logged in debug builds: (1) a private initializer taking the source info, looked up by
+name **and validated against its own `NSMethodSignature`** before being invoked, else
+(2) a `CLLocation` subclass overriding `-sourceInformation`. See [Known limits](#known-limits)
+for the class-identity caveat of strategy 2.
 
 ---
 
@@ -41,83 +93,86 @@ order.
 
 | Path | What it is |
 |---|---|
-| `Tweak.x` | The three hook sites, delegate swizzling, synthetic update timer |
-| `GSConfig.{h,m}` | Immutable snapshot of the preferences plist; Darwin-notification reload |
-| `GSLocationFactory.{h,m}` | Builds the `CLLocation`; noise, accuracy, `sourceInformation` |
+| `Tweak.x` | locationd-only: the `CLLocation` + `CLVisit` `encodeWithCoder:` swizzles and the `%ctor` |
+| `GSLocationFactory.{h,m}` | Builds the spoofed `CLLocation`; noise, accuracy, `sourceInformation` |
 | `GSRouteEngine.{h,m}` | GPX parsing, haversine cumulative distance, interpolation |
+| `GSConfig.{h,m}` | Preferences snapshot; Darwin-notification live reload |
 | `GSCommon.h` | Identifier, `jbroot()`-based paths, logging gate |
-| `cli/main.m` | The `geoshim` command-line tool |
-| `GeoShim.plist` | Injection filter — `com.apple.Maps` **and** the `locationd` executable |
+| `cli/main.m` | The `geoshim` control tool |
+| `cli/entitlements.plist` | roothide `no-sandbox` entitlements for the CLI (see Building) |
+| `GeoShim.plist` | Injection filter — the `locationd` executable only |
 | `examples/tokyo-loop.gpx` | A short loop for smoke-testing route mode |
-
-`Tweak.x` splits into two halves at load time (`gs_isLocationd()`): the grouped
-`GSClientHooks` (`CLLocationManager`) install in apps only, and a single manual swizzle
-of `-[CLLocation encodeWithCoder:]` installs in `locationd` only.
 
 ---
 
 ## Building
 
-Theos on Linux (this tree was built from WSL2 Fedora against Theos with the
-`iPhoneOS16.5.sdk` and the Linux toolchain). Two requirements beyond a stock Theos:
+Theos on Linux (this tree builds from WSL2 Fedora against the `iPhoneOS16.5.sdk` and the
+Linux toolchain). Requirements beyond a stock Theos:
 
-- **roothide Theos support.** The `roothide` package scheme and the `jbroot()` API
-  (`<roothide.h>`) come from roothide's Theos fork/patches. A stock Theos has neither
-  and the build fails at `'roothide' package scheme does not exist`. Install roothide
-  support per <https://roothidebootstrap.com/develop/> (or switch your Theos to the
-  roothide branch). This tree was built against that.
-- Two host tools Fedora does not ship:
+- **roothide Theos support** — the `roothide` package scheme and `jbroot()` (`<roothide.h>`)
+  come from roothide's Theos fork. A stock Theos fails at `'roothide' package scheme does
+  not exist`. Install per <https://roothidebootstrap.com/develop/> or switch Theos to the
+  roothide branch.
+- **`dpkg` and `ldid`**, which Fedora does not ship:
 
 ```bash
-sudo dnf install -y dpkg                 # dpkg-deb, for packaging
+sudo dnf install -y dpkg
 git clone --depth 1 https://github.com/ProcursusTeam/ldid.git && cd ldid
-make && sudo install -m 0755 ldid /usr/local/bin/ldid    # for signing
+make && sudo install -m 0755 ldid /usr/local/bin/ldid
 ```
 
-`THEOS_PACKAGE_SCHEME = roothide` is set in the Makefile, so the deb comes out
-`iphoneos-arm64e` with files staged at jbroot-relative paths (no `/var/jb`), linked
-against `libroothide.dylib` via the `.jbroot` symlink. Then:
+Then:
 
 ```bash
 export THEOS=$HOME/theos
 export PATH=/usr/local/bin:$PATH
 
-make package                    # debug build, logging still off
-make package GEOSHIM_DEBUG=1    # debug build with 1 Hz logging (use for bring-up)
-make package FINALPACKAGE=1     # release; ship this
+make package GEOSHIM_DEBUG=1    # 1 Hz logging in locationd — use for bring-up
+make package FINALPACKAGE=1     # silent release — ship this
 ```
 
-The `.deb` lands in `packages/`. Installing:
+`THEOS_PACKAGE_SCHEME = roothide` (in the Makefile) produces an `iphoneos-arm64e` deb with
+files staged at jbroot-relative paths (no `/var/jb`), linked against `libroothide.dylib`
+via the `.jbroot` symlink. The `.deb` lands in `packages/`.
+
+### The CLI needs roothide entitlements
+
+`cli/entitlements.plist` (the four keys from roothide's `entitlements.md` —
+`platform-application`, `com.apple.private.security.no-sandbox`, `…storage.AppBundles`,
+`…storage.AppDataContainers`) is signed into `geoshim` via `geoshim_CODESIGN_FLAGS`.
+**Without `no-sandbox` the tool runs containerized**: its preference writes land in a
+private container `locationd` never sees, and dyld is denied access to jbroot libraries
+(so it fails to load even when the file is present). This is not optional.
+
+> **Build from Windows via `wsl.exe`:** pass the script on stdin
+> (`wsl.exe -d <distro> -- bash < script.sh`). As `bash -lc '...'` the `$VAR` references
+> get mangled in transit.
+
+---
+
+## Installing
+
+**Install through Sileo/Zebra (or `apt`), not a bare `dpkg -i`.** roothide's package
+manager runs the dpkg pipeline that creates the per-directory **`.jbroot` symlinks** the
+binaries need to resolve `@loader_path/.jbroot/...` dependencies. A wrong-context
+`dpkg -i` can leave `.jbroot` pointing at `//` (the rootfs root), which breaks dylib
+resolution — the symptom is `dyld: Library not loaded: @loader_path/.jbroot/usr/lib/…`.
 
 ```bash
-make package install THEOS_DEVICE_IP=<device> THEOS_DEVICE_PORT=22
-# or copy the .deb over and: dpkg -i xyz.regulad.geoshim_*.deb
-#   then: killall -9 Maps locationd
+# copy the .deb over, then on-device:
+sudo apt install ./xyz.regulad.geoshim_0.1.0_iphoneos-arm64e.deb
+killall -9 locationd
+geoshim status
 ```
 
-The jailbreak prefix is never written in source. Both the dylib and the CLI resolve the
-preferences and route paths at runtime with `jbroot(@"/var/mobile/...")`, so the app,
-`locationd` and the CLI all agree on one absolute path without any of them knowing the
-randomized root.
-
-### Enabling locationd injection (required for blacklisted apps)
-
-`locationd` only receives tweaks if roothide re-signs it, which it does for executables
-listed in `resignList.plist`. **`/usr/libexec/locationd` is in roothide's default list**,
-so no action is normally needed. Confirm on device:
-
-```bash
-grep -c locationd $(jbroot)/basebin/resignList.plist   # expect 1; jbroot = your root
-```
-
-If it is missing, add `<string>/usr/libexec/locationd</string>` to the `executables`
-array and reboot. Note the caveat in [Open VERIFY items](#open-verify-items): roothide's
-daemon injection is documented for iOS 16–17, and its status on 15.8.2 is the single
-biggest unknown in this project.
-
-> Building from Windows via `wsl.exe`: pass the script on stdin
-> (`wsl.exe -d <distro> -- bash < script.sh`). Passing it as `bash -lc '...'` gets the
-> `$VAR` references mangled in transit.
+Dopamine2‑roothide injects `locationd` natively: systemhook is inserted into launchd and
+hooks `posix_spawn`/`execve`, so every process — daemons included — inherits injection.
+`locationd` is **not** on Dopamine's tweak-injection exclusion list (only `xpcproxy`
+always, and `logd`/`notifyd`/`usermanagerd` on iOS 16+), so no `resignList` step is
+required — that mechanism is specific to the TrollStore roothide *Bootstrap*, a different
+product. Just make sure Tweak Injection is enabled and you are not in safe mode
+(`ls "$(jbroot /basebin/.safe_mode)"`).
 
 ---
 
@@ -136,23 +191,18 @@ Options for `start`:
 |---|---|
 | `--source-info <nil\|clean\|passthrough>` | how `CLLocation.sourceInformation` reads |
 | `--jitter <metres>` | per-update coordinate noise (default 2 m) |
-| `--interval <seconds>` | synthetic update cadence (default 1 s) |
-| `--no-synthesize` | only substitute real callbacks; never invent one |
 | `--debug-log-real` | log genuine fixes — needs a `GEOSHIM_DEBUG=1` build |
+| `--interval`, `--no-synthesize` | *inert in daemon-only mode* (legacy of the removed client timer) |
 
-The tool writes the plist, makes it readable by `mobile`, and posts
-`xyz.regulad.geoshim/prefsChanged`. Changes take effect immediately in every already
-running client; no respring.
-
-`geoshim route` copies the GPX to `/var/jb/var/mobile/Library/GeoShim/route.gpx` so it
-sits next to the preferences with the same ownership, and points `RoutePlistPath` there.
-A route file left in `/var/root` or `/tmp` would not be readable from a sandboxed app.
-
-Convert real routes to GPX with <https://mapstogpx.com/>.
+The tool writes the plist (readable by `mobile`) and posts
+`xyz.regulad.geoshim/prefsChanged`. `locationd` re-reads it live via a Darwin-notification
+observer — no respring. `geoshim route` stages the GPX under
+`jbroot(/var/mobile/Library/GeoShim/)` so it is readable from the daemon. Convert routes to
+GPX with <https://mapstogpx.com/>.
 
 ### Preferences
 
-`/var/jb/var/mobile/Library/Preferences/xyz.regulad.geoshim.plist`
+`jbroot(/var/mobile/Library/Preferences/xyz.regulad.geoshim.plist)`
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -162,335 +212,171 @@ Convert real routes to GPX with <https://mapstogpx.com/>.
 | `Mode` | string | `static` | `static` or `route` |
 | `SourceInfoMode` | string | `nil` | `nil`, `clean`, `passthrough` |
 | `JitterMetres` | real | 2.0 | Gaussian coordinate noise per update |
-| `UpdateIntervalSec` | real | 1.0 | Synthetic update cadence |
 | `RoutePlistPath` | string | "" | Path to a `.gpx` or `.plist` route |
 | `RouteLoop` | bool | true | Loop at the end of the route |
 | `RouteEndBehavior` | string | from `RouteLoop` | `loop`, `reverse`, `stop` |
 | `RouteSpeedMps` | real | 1.4 | Base speed; varied ±10% per tick |
-| `SynthesizeUpdates` | bool | true | Deliver on a timer even with no real fixes |
 | `LogRealFixes` | bool | false | Debug builds only; logs genuine fixes |
 
-Anything unparseable — a missing plist, a bad coordinate, a route with fewer than two
-points — resolves to *disabled*, not to an error. The tweak fails open by construction.
-
----
-
-## How it works
-
-### Two processes, two strategies
-
-At load, `gs_isLocationd()` (a `getprogname()` check) decides which half runs. The two
-never coexist in one process, which bounds the blast radius of each.
-
-**In `locationd` — one hook.** Positions are handed to clients as an NSSecureCoding keyed
-archive over XPC (`bplist17`, confirmed by
-[8kSec's Frida teardown](https://8ksec.io/advanced-frida-usage-part-4-sniffing-location-data-from-locationd-in-ios/)),
-so `-[CLLocation encodeWithCoder:]` is the outbound serialisation chokepoint — and it is
-reached even when the client blocks in-process injection. Rather than guess the archive's
-key names, GeoShim replaces the *object* being encoded: it builds a fully spoofed
-`CLLocation` and runs the original encoder against that. Whatever keys `CLLocation`
-normally writes, it writes for the fake. Fixes with an invalid coordinate (region/visit
-archiving and other internal round-trips) are left alone, and anything that throws falls
-through to the real encode. This is why a roothide-blacklisted app is still spoofed.
-
-**In the app — the client hooks (below).** These are still worth installing for apps that
-*do* allow injection: they give per-app control the daemon cannot (the daemon spoofs
-every client at once), and the synthetic-update timer works even when the app has no
-fix to serialise.
-
-Three hook sites on `CLLocationManager` (grouped `GSClientHooks`, apps only):
-
-- **`-location`** — for apps that poll rather than subscribe.
-- **`-setDelegate:`** — the delegate class lives in the host app, so it cannot be
-  `%hook`ed by name. On first sight of a delegate class we swizzle
-  `locationManager:didUpdateLocations:` and the legacy
-  `locationManager:didUpdateToLocation:fromLocation:`, replacing the location argument
-  and calling on to the original IMP. Each class is swizzled exactly once (a set of
-  class pointers); a class that does not implement a callback does not get one added.
-- **`-startUpdatingLocation`** / `-stopUpdatingLocation` / `-requestLocation` — a
-  dispatch timer delivers spoofed updates on a cadence, so the tweak still works when
-  permission is denied or GPS is cold and no real callback ever arrives. The timer skips
-  a tick if a real callback landed within the last 1.5 intervals, so the app is not fed
-  two fixes for one moment, and it calls the original IMP directly so its own delivery
-  is never mistaken for a real one.
-
-**Nothing is installed while `Enabled` is false.** No swizzles, no timers — the hooks
-call `%orig` and return. Enabling applies the state to every manager seen so far, so
-live toggling works without a restart. One asymmetry to know about: *disabling* after
-having been enabled cannot remove a swizzle, so the delegate keeps a pass-through hook
-until the app is restarted. Behaviour is unchanged; the runtime shape is not.
-
-### Making the fix look real
-
-Per-update, every field is populated rather than left at a placeholder:
-
-- coordinate jittered by a Gaussian ±`JitterMetres` (metres → degrees corrected for
-  latitude, with `cos(lat)` clamped near the poles)
-- `horizontalAccuracy` is a random walk over 5–65 m, `verticalAccuracy` over 3–10 m —
-  a walk, not a constant and not uniform noise, because that is how a receiver behaves
-  as its solution firms up or degrades
-- `speed` 0 ± small noise when stationary, from the polyline when moving;
-  `speedAccuracy` a small positive value, never −1
-- `course` −1 when stationary, the segment bearing when moving, blended across vertices
-  rather than snapped; `courseAccuracy` positive only when the course is valid
-- `altitude` from config ± 0.5 m
-- `timestamp` is `[NSDate date]` at delivery
-
-Route mode advances a distance cursor by `speed × elapsed` along the cumulative
-haversine polyline, varies speed ±10%, and eases through sharp turns instead of
-pivoting at full speed.
-
-### `sourceInformation`
-
-`SourceInfoMode` has three states, per the brief, so you can A/B them against a real
-target:
-
-- **`nil`** (default) — the public initializer, so the property is `nil`. This is what a
-  `CLLocation` built by anyone else looks like, and it needs no private API at all.
-- **`clean`** — attaches `[[CLLocationSourceInformation alloc]
-  initWithSoftwareSimulationState:NO andExternalAccessoryState:NO]`. That initializer is
-  **public API**, declared in `CLLocation.h` and available since iOS 15.0 — confirmed in
-  the SDK, not guessed.
-- **`passthrough`** — copies whatever the last genuine fix reported.
-
-Attaching the object to a `CLLocation` is the part with no public answer. Two
-strategies, resolved once at first use and logged in debug builds:
-
-1. A private initializer taking the source info. It is looked up by name **and validated
-   against its own `NSMethodSignature`** — 12 arguments, a struct, seven doubles, then
-   two objects — before it is ever invoked. A selector that exists with a different
-   shape is rejected rather than called.
-2. Otherwise a `CLLocation` subclass overriding `-sourceInformation`. Always works,
-   costs no private API, and is scoped to the objects we build — but see Known limits.
+`UpdateIntervalSec` / `SynthesizeUpdates` are still parsed but do nothing in daemon-only
+mode. Anything unparseable — a missing plist, a bad coordinate, a route under two points —
+resolves to *disabled*, not an error. The tweak fails open by construction.
 
 ---
 
 ## Verification
 
-Work these in order. A debug-logging build (`make package GEOSHIM_DEBUG=1`) is the right
-one for steps 1–4; watch with `idevicesyslog | grep geoshim` or `oslog` on device.
+Use a `GEOSHIM_DEBUG=1` build and watch with `oslog | grep geoshim` (locationd is the only
+process that logs `[geoshim]`) or `idevicesyslog | grep geoshim`.
 
-1. **It loads — in both processes.** Launch Maps and expect
-   `[geoshim] loaded in Maps (client enabled=0 …)`. Then check the daemon:
-   `[geoshim] loaded in locationd (daemon …)` followed by
-   `[geoshim] locationd: encodeWithCoder: hook installed`. **If the locationd line never
-   appears, daemon injection is not happening** — this is the make-or-break test on
-   iOS 15; see [Open VERIFY items](#open-verify-items). `killall -9 locationd` to force
-   a reload while watching the log.
-2. **Preferences are readable — from locationd.** `geoshim start -x 35.6812 -y 139.7671`.
-   A `[geoshim] config: no readable plist at …` line *from locationd* means the daemon's
-   sandbox is blocking the jbroot read (VERIFY item 4); from an app it means the app
-   sandbox is (see Troubleshooting).
-3. **The blacklisted app moves.** With the target app on roothide's blacklist (no
-   injection into it), spoof a coordinate in another hemisphere and confirm its position
-   changes anyway. In a `GEOSHIM_DEBUG=1` build, locationd logs
-   `[geoshim] locationd: encode <real> -> <fake>` on each outbound fix — that line is
-   proof the daemon path is doing the work. If the app does not move but the line is
-   logged, locationd is *not* delivering via `encodeWithCoder:` on this version and the
-   fallback in [Open VERIFY items](#open-verify-items) applies.
-4. **The injectable app moves (client path).** In Maps (not blacklisted), tap locate. If
-   it does not move, check whether `[geoshim] hook: delegate class …` was logged: no line
-   means `setDelegate:` never fired and Maps is polling `-location` instead.
-5. **Property sanity.** Compare a few consecutive deliveries against the table above.
-   Constant accuracy or a stale timestamp means something is wrong.
-6. **`sourceInformation` behaves as designed.** Build with `GEOSHIM_DEBUG=1`,
-   `geoshim start … --debug-log-real`, read the `real fix:` lines with spoofing off. See
-   [Open VERIFY items](#open-verify-items).
-7. **No regression when disabled.** `geoshim stop`, restart the app *and*
-   `killall -9 locationd`, confirm behaviour is identical to the tweak not being
-   installed. This is the safety net; do not skip it.
-8. **Then widen the filter,** one target at a time, testing after each.
+1. **It loads.** `killall -9 locationd`, then expect
+   `loaded in locationd (…)`, `CLLocation encodeWithCoder: hook installed`, and
+   `CLVisit encodeWithCoder: hook installed (coordOffset=N …)`. A `coordOffset` ≥ 0 means
+   the `CLVisit` ivar was found; `CLVisit coordinate ivar not found` means visits are left
+   unspoofed on this build (report it and it's an easy fix).
+2. **The blacklisted app moves.** `geoshim start -x 51.5074 -y -0.1278`, open the target
+   app. Each outbound fix logs `locationd: encode <real> -> <fake>` — that line is the
+   proof the daemon path is doing the work. Because the app gets no injection, its moving
+   can *only* be the locationd hook.
+3. **Property sanity.** Confirm accuracy/timestamp/speed vary per the fields above; a
+   constant accuracy or stale timestamp means something is wrong.
+4. **`sourceInformation` behaves as designed** — `--debug-log-real`, read `real fix:` with
+   spoofing off; compare against [VERIFY](#open-verify-items).
+5. **No regression when disabled.** `geoshim stop`, `killall -9 locationd`; behaviour must
+   be identical to the tweak not being installed. The safety net — do not skip it.
 
-`geoshim status` also reports the parsed point count and length of a loaded route, which
-is the quickest way to confirm the GPX parser handled your file.
+`geoshim status` also reports a loaded route's parsed point count and length.
 
 ---
 
 ## Rollback
 
-Read this before widening the injection filter.
-
-This tweak injects into `locationd`, a system daemon that every process relies on for
-location. A crash in our dylib is a crash in `locationd`. Have this ready **before** you
-first install, not after.
+`locationd` is a daemon every process relies on; a crash in this dylib is a crash in it.
+Keep this ready **before** first install.
 
 ```bash
 ssh root@<device>
-# jbroot is your randomized root; `jbroot /path` on device prints the real path.
+# `jbroot /path` on device prints the real path.
 mv "$(jbroot /Library/MobileSubstrate/DynamicLibraries/GeoShim.dylib)"{,.disabled}
-killall -9 locationd SpringBoard
+killall -9 locationd
 ```
 
-Moving the `.dylib` aside is enough — with the dylib gone the `.plist` filter matches
-nothing. To remove it entirely: `dpkg -r xyz.regulad.geoshim`. If `locationd` itself is
-crash-looping, the device stays usable (location just stops working) and SSH still works,
-which is why the daemon target is survivable where SpringBoard would not be.
-
-The filter ships matching `com.apple.Maps` and the `locationd` executable. Widening the
-app side to `com.apple.corelocation` (anything linking the framework) is a deliberate
-later step. Do **not** add `com.apple.springboard`, `backboardd`, or other UI-critical
-processes casually — that is the difference between a bug that annoys you and a bug that
-bootloops you.
+With the dylib gone the filter matches nothing; to remove entirely, `apt remove
+xyz.regulad.geoshim`. A crash-looping `locationd` leaves the device usable (location just
+stops) and SSH working — which is why the daemon target is survivable. The filter targets
+**only** `locationd`; do not add UI-critical processes.
 
 ---
 
 ## Open VERIFY items
 
-Ordered by how likely they are to sink the locationd approach. The first two are the
-ones the whole daemon path rests on.
+Confirmed on-device (iOS 15.8.2 / Dopamine2‑roothide), previously the biggest unknowns:
 
-**1. Does roothide inject into `locationd` on iOS 15.8.2 at all?** *(biggest unknown)*
-roothide's release notes tag "injecting into some system daemons (see `resignList.plist`)"
-as **iOS 16.0–17.0**. `launchd` injection is documented back to iOS 15.8, and
-`/usr/libexec/locationd` is in the default `resignList.plist`, so the mechanism and the
-allow-list entry both exist on 15 — but whether the daemon-injection path is actually
-wired on 15.8.2 is unconfirmed. **Test first** (Verification step 1): if
-`loaded in locationd` never logs, this project's core does not work on your build, and
-no amount of the code below matters. There is no in-repo workaround; it is a property of
-the bootstrap.
+- **Daemon injection works on iOS 15.** `loaded in locationd` fires; `locationd` inherits
+  systemhook injection and is not excluded.
+- **`locationd` delivers via `encodeWithCoder:`.** `locationd: encode <real> -> <fake>`
+  logs on each fix and clients move. The bplist17/NSSecureCoding assumption held.
+- **`locationd` can read the jbroot prefs.** The daemon reads and spoofs after
+  `geoshim start`, so its sandbox reaches the plist.
 
-**2. Does `locationd` deliver client fixes via `-[CLLocation encodeWithCoder:]`?**
-The interception assumes locationd serialises outbound positions as an NSSecureCoding
-keyed archive — strongly implied by the `bplist17` payloads seen in the Frida teardown,
-but not proven for 15.8.2. Confirm with a `GEOSHIM_DEBUG=1` build: if
-`locationd: encode <real> -> <fake>` logs on every fix *and* clients move, it holds. If
-the hook installs but never logs on the delivery path, locationd is building the XPC
-dictionary from raw doubles instead. **Fallback:** class-dump `/usr/libexec/locationd`
-on device, find the per-client delivery selector (look around `CLDaemon` /
-`CLXPCConnection` / the position-broadcast method), and swizzle that, or rewrite the
-outbound `xpc_dictionary` at the C layer. Both need the on-device dump this environment
-could not produce.
+Still open / device-specific:
 
-**3. Can `locationd`'s sandbox read the prefs plist under the randomized jbroot?**
-The plist lives at `jbroot(/var/mobile/Library/Preferences/…)`. An injected daemon
-normally inherits roothide's sandbox extensions, but if locationd logs
-`config: no readable plist`, it cannot reach jbroot. Remedy: stage the plist somewhere in
-locationd's existing sandbox, or grant an extension. Isolated from the rest.
-
-**4. What does a genuine fix report for `sourceInformation` on 15.8.2?**
-Build with `GEOSHIM_DEBUG=1`, set `LogRealFixes`, read `real fix:` with spoofing off:
-
-- `sourceInfo=(null)` → `SourceInfoMode = nil` is correct; the default needs no private
-  API.
-- non-nil with both flags `NO` → nil is anomalous; switch to `--source-info clean`.
-
-Note the daemon path has a wrinkle here: replacing the encoded object only carries
-`sourceInformation` if the private initializer (strategy 1) is live, because the
-subclass fallback stores the object in an override, not the ivar `encodeWithCoder:`
-reads. Coordinate/altitude/speed/course/timestamp always carry.
-
-**5. Is `Depends: ellekit` right for roothide?**
-roothide links `libroothide.dylib` and `libsubstrate.dylib` (ElleKit). `Depends: ellekit`
-is the usual name; confirm with `dpkg -l | grep -iE "ellekit|substrate"` and edit
-`control` if your bootstrap names it differently.
-
-Resolved without a device, no further work:
-
-- **roothide packaging** — `THEOS_PACKAGE_SCHEME = roothide` builds `iphoneos-arm64e`
-  with jbroot-relative paths and links `jbroot()` from `libroothide.dylib` via the
-  `.jbroot` symlink. Confirmed with `dpkg-deb -c` and `strings`/`nm` on the dylib.
-- `-[CLLocationSourceInformation initWithSoftwareSimulationState:andExternalAccessoryState:]`
-  is **public**, declared in `CLLocation.h` (iOS 15.0+). Confirmed in the SDK.
-- The prefs path needs no coordination: the dylib and CLI both resolve it through the
-  same `jbroot()` input at runtime.
-- Whether a `CLLocation` initializer taking source info exists is answered at runtime by
-  probe-and-validate, not a static guess.
+- **`CLVisit` ivar layout.** The coordinate ivar offset is discovered at load and logged
+  (`coordOffset=…`). If it ever reads `not found`, the class layout differs and the
+  rewrite needs the ivar name adjusted; until then visits fail closed (real coordinate).
+- **`sourceInformation` of a genuine fix on 15.8.2.** Run the `--debug-log-real` probe; if
+  real fixes report a non-nil object with both flags `NO`, switch from `nil` to
+  `--source-info clean`. In the daemon path, `clean`/`passthrough` only carry through the
+  private initializer (strategy 1); the subclass fallback encodes nil sourceInformation —
+  coordinate/altitude/speed/course/timestamp always carry.
+- **`Depends: ellekit`.** Confirm with `dpkg -l | grep -iE "ellekit|substrate"`; edit
+  `control` if your bootstrap names it differently.
 
 ---
 
 ## Troubleshooting
 
-**`loaded in locationd` never appears** — daemon injection is not happening. Confirm
-`/usr/libexec/locationd` is in `resignList.plist` and reboot; if it is present and still
-no injection, roothide's daemon path is likely not wired on your iOS 15 build (VERIFY 1).
+**`dyld: Library not loaded: @loader_path/.jbroot/usr/lib/…`** — the `.jbroot` symlink for
+the binary's directory is wrong (often `-> //`). Reinstall through Sileo/`apt`, which
+recreates it. If the CLI specifically fails, it also needs the `no-sandbox` entitlement
+(see Building) — without it the sandbox denies dyld the jbroot path even when the file
+exists.
 
-**`config: no readable plist`** — a sandbox is refusing the read. Confirm the file exists
-and is `mobile`-readable (`ls -l` it; `geoshim` sets 0644 and chowns to 501:501 when run
-as root). From an *app*, `libSandy` is the usual remedy. From *locationd*, it is VERIFY 3
-— the daemon cannot reach jbroot.
+**`loaded in locationd` never appears** — injection isn't reaching the daemon. Confirm
+Tweak Injection is on and you're not in safe mode; on Dopamine2‑roothide no `resignList`
+step is needed.
 
-**Blacklisted app does not move, but `locationd: encode …` logs** — locationd is not
-delivering via `encodeWithCoder:` on this version (VERIFY 2); the fallback there applies.
+**`config: no readable plist`** — `locationd` cannot read the plist. Confirm it exists and
+is `mobile`-readable (`geoshim` sets 0644, chowns 501:501 when run as root). If `geoshim`
+itself wrote it to the wrong place, it is missing the `no-sandbox` entitlement.
 
-**Blue dot does not move in an injectable app but the tweak logs on load** — the app is
-polling `-location`, or it caches the first fix. Check for `hook: delegate class …` lines.
+**App does not move but `locationd: encode …` logs** — locationd isn't delivering that
+app's fixes via `encodeWithCoder:`; class-dump `locationd` for the actual delivery selector
+(around `CLDaemon` / `CLXPCConnection`).
 
-**Route mode behaves as static** — the route failed to load, and the config deliberately
-degrades to the static coordinate. Run `geoshim status`; a point count under 2 means the
-GPX had no `trkpt`/`rtept`/`wpt` elements the parser recognised.
+**Route behaves as static** — the route failed to load and degraded to the static
+coordinate. `geoshim status`; a point count under 2 means no `trkpt`/`rtept`/`wpt` were
+parsed.
 
 ---
 
 ## Known limits
 
-GeoShim owns the **CLLocation delivery path** out of locationd — which is what the vast
-majority of apps use, and which is what `sourceInformation` checks read. It does **not**
+GeoShim owns the **CLLocation / CLVisit delivery path** out of locationd — which is what
+the vast majority of apps use, and what `sourceInformation` checks read. It does **not**
 touch any location signal an app gathers outside CoreLocation.
 
 ### The channels that still reveal the real location
 
-These are the ones that matter for this deployment (a **Wi-Fi-only iPad**, so anything
-cellular is not applicable and is noted as such):
+For this deployment (a **Wi-Fi-only iPad**, so anything cellular is not applicable):
 
-- **Connected Wi-Fi BSSID — the primary concern.** `CNCopyCurrentNetworkInfo` /
-  `NEHotspotNetwork.fetchCurrent` return the SSID and **BSSID of the currently connected
-  access point** (not a scan of nearby ones — just the joined AP), given the "Access WiFi
-  Information" entitlement plus location permission. That one BSSID maps to a real
-  physical location through any Wi-Fi positioning database and directly contradicts the
-  spoofed coordinate. locationd does **not** expose nearby BSSIDs to apps, so the scan
-  list is closed — but the *connected* AP is readable and is outside our reach. On a
-  Wi-Fi-only iPad this is the single strongest tell.
-- **CoreBluetooth — the other primary concern.** `CBCentralManager` scanning runs
-  entirely outside locationd, so nothing here intercepts it. iOS randomizes peripheral
-  MACs, which weakens generic fingerprinting, but **fixed-UUID iBeacons** in a known venue
-  are a strong location signal. (iBeacon *ranging* via `CLLocationManager` goes through
-  locationd and *is* covered; raw `CBCentralManager` scanning is not.)
-- **IP geolocation (server-side).** A backend geolocates the device's public IP. Reveals
-  the network's real location unless traffic egresses at the spoofed location (VPN/proxy).
-  Entirely outside CoreLocation.
-- **Cellular — not applicable here.** `CTCarrier` MCC/MNC and serving-cell identifiers
-  would betray country/region on a cellular device, but this iPad has no cellular radio,
-  so this channel does not exist for it.
-- **Sensor disagreement.** `CMMotionActivity` reports *stationary* while a spoofed route
-  advances at speed; `CMAltimeter` barometric altitude and `NSTimeZone.localTimeZone`
-  still describe the real environment. Route mode makes the trace plausible *in isolation*
-  but fabricates no matching sensor data.
+- **Connected Wi-Fi BSSID — primary.** `CNCopyCurrentNetworkInfo` /
+  `NEHotspotNetwork.fetchCurrent` return the SSID/BSSID of the **currently connected** AP
+  (not a scan — just the joined one), given the "Access WiFi Information" entitlement plus
+  location permission. That BSSID maps to a real location through any Wi-Fi positioning DB
+  and contradicts the spoof. locationd does **not** expose nearby-BSSID scans to apps, so
+  the scan list is closed — but the connected AP is readable and out of our reach.
+- **CoreBluetooth — primary.** `CBCentralManager` scanning runs outside locationd. iOS
+  randomizes peripheral MACs, weakening generic fingerprinting, but **fixed-UUID iBeacons**
+  in a known venue are a strong location signal. (iBeacon *ranging* via `CLLocationManager`
+  goes through locationd and *is* covered; raw `CBCentralManager` scanning is not.)
+- **IP geolocation (server-side).** A backend geolocates the public IP. Coarse
+  (city/region), and it reveals a *mismatch* rather than a pinpoint — closed by egressing
+  at the spoofed location (a VPN **upstream of the device**, e.g. on a router, so the iPad
+  shows no `utun` interface for an app to detect).
+- **Cellular — not applicable** on this Wi-Fi-only iPad.
+- **Sensor disagreement.** `CMMotionActivity` reports stationary while a route advances;
+  `CMAltimeter` and `NSTimeZone.localTimeZone` still describe the real environment.
 
-### Within locationd but not yet covered by this hook
+### Within locationd but not covered
 
-The swizzle rewrites `-[CLLocation encodeWithCoder:]` only. Other objects locationd
-serializes still carry the real position:
-
-- **`CLVisit`** has its own `coordinate` and its own encoder — visit monitoring can leak
-  the real place.
-- **`CLRegion` / geofences** are evaluated inside locationd against the true position, and
-  `CLCircularRegion` is not a `CLLocation`, so region crossings still fire for real.
-
-Both are reachable as extensions of the same daemon hook if they matter.
+- **Region monitoring / `requestStateForRegion:`.** locationd computes region state from
+  the **real** position and returns an *enum*, not a coordinate — so the encode-time hook
+  can't touch it, and an app could binary-search its true position with a grid of regions.
+  It requires **"Always"** authorization, so setting the app to **"While Using"** in
+  Settings closes it (and visits, and significant-location-change) with no code. Covering
+  it in-tweak means a deeper hook of locationd's region evaluation (private, class-dump
+  needed).
+- **`CLBeacon` ranging** — only leaks if the app ranges iBeacons; no coordinate to rewrite.
 
 ### Other properties worth knowing
 
-- **Not defeated: injected-image detection.** `_dyld_image_count` / `_dyld_get_image_name`
-  in locationd would list `GeoShim.dylib`. Not a concern for a third-party app (it cannot
-  walk locationd's image list), but stated for completeness.
-- **Class identity, in `clean`/`passthrough` mode with the subclass fallback.** If the
-  private `sourceInformation` initializer is unavailable, a delivered location's class is
-  `GSLocation`, not `CLLocation`; `isKindOfClass:` passes, an exact class comparison does
-  not. The default `nil` mode returns a genuine `CLLocation` and avoids this.
-- **System-wide by design.** While active, *every* location client is spoofed at once;
-  there is no per-app control on the daemon path.
-- **`encodeWithCoder:` replacement is broad within locationd.** Every outbound fix with a
-  valid coordinate is rewritten, including ones locationd archives for itself — so
-  Settings → Privacy → Location → System Services → Significant Locations accumulates
-  spoofed entries while spoofing is on. Invalid-coordinate objects (regions, visits) are
-  left alone.
+- **Not defeated: injected-image detection** in locationd (`_dyld_get_image_name` lists
+  `GeoShim.dylib`). Not reachable by a third-party app, but stated for completeness.
+- **Class identity** in `clean`/`passthrough` with the subclass fallback: a delivered
+  location's class is `GSLocation`, not `CLLocation`; `isKindOfClass:` passes, an exact
+  comparison does not. The default `nil` mode returns a genuine `CLLocation`.
+- **System-wide by design.** Every location client is spoofed at once; there is no per-app
+  control on the daemon path.
+- **`encodeWithCoder:` is broad within locationd.** Every valid-coordinate outbound fix is
+  rewritten, including ones locationd archives for itself — so Settings → Privacy →
+  Location → System Services → Significant Locations accumulates spoofed entries while on.
 
 **Bottom line for this iPad:** the realistic ways an app still learns the true location
-are the **connected Wi-Fi BSSID** and **CoreBluetooth (iBeacons)**. Both live above
-CoreLocation; closing them is a separate effort (hooking `CNCopyCurrentNetworkInfo` /
-Bluetooth), not something the locationd hook can reach.
-
-The failure mode for this kind of tool is a user who believes it is stronger than it is.
+are the **connected Wi-Fi BSSID** and **CoreBluetooth (iBeacons)** — both above
+CoreLocation, closed by moving the VPN upstream and (for BSSID) by the app not holding the
+Wi-Fi entitlement. The failure mode for this kind of tool is a user who believes it is
+stronger than it is.
 
 ---
 
