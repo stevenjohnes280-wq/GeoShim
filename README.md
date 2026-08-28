@@ -423,37 +423,72 @@ GPX had no `trkpt`/`rtept`/`wpt` elements the parser recognised.
 
 ## Known limits
 
-This defeats `sourceInformation` checks. It does not defeat:
+GeoShim owns the **CLLocation delivery path** out of locationd — which is what the vast
+majority of apps use, and which is what `sourceInformation` checks read. It does **not**
+touch any location signal an app gathers outside CoreLocation.
 
-- **Injected-image detection.** `_dyld_image_count` / `_dyld_get_image_name` will list
-  `GeoShim.dylib`. Any app that walks its own image list sees it.
-- **Jailbreak detection** in general. Out of scope.
+### The channels that still reveal the real location
+
+These are the ones that matter for this deployment (a **Wi-Fi-only iPad**, so anything
+cellular is not applicable and is noted as such):
+
+- **Connected Wi-Fi BSSID — the primary concern.** `CNCopyCurrentNetworkInfo` /
+  `NEHotspotNetwork.fetchCurrent` return the SSID and **BSSID of the currently connected
+  access point** (not a scan of nearby ones — just the joined AP), given the "Access WiFi
+  Information" entitlement plus location permission. That one BSSID maps to a real
+  physical location through any Wi-Fi positioning database and directly contradicts the
+  spoofed coordinate. locationd does **not** expose nearby BSSIDs to apps, so the scan
+  list is closed — but the *connected* AP is readable and is outside our reach. On a
+  Wi-Fi-only iPad this is the single strongest tell.
+- **CoreBluetooth — the other primary concern.** `CBCentralManager` scanning runs
+  entirely outside locationd, so nothing here intercepts it. iOS randomizes peripheral
+  MACs, which weakens generic fingerprinting, but **fixed-UUID iBeacons** in a known venue
+  are a strong location signal. (iBeacon *ranging* via `CLLocationManager` goes through
+  locationd and *is* covered; raw `CBCentralManager` scanning is not.)
+- **IP geolocation (server-side).** A backend geolocates the device's public IP. Reveals
+  the network's real location unless traffic egresses at the spoofed location (VPN/proxy).
+  Entirely outside CoreLocation.
+- **Cellular — not applicable here.** `CTCarrier` MCC/MNC and serving-cell identifiers
+  would betray country/region on a cellular device, but this iPad has no cellular radio,
+  so this channel does not exist for it.
+- **Sensor disagreement.** `CMMotionActivity` reports *stationary* while a spoofed route
+  advances at speed; `CMAltimeter` barometric altitude and `NSTimeZone.localTimeZone`
+  still describe the real environment. Route mode makes the trace plausible *in isolation*
+  but fabricates no matching sensor data.
+
+### Within locationd but not yet covered by this hook
+
+The swizzle rewrites `-[CLLocation encodeWithCoder:]` only. Other objects locationd
+serializes still carry the real position:
+
+- **`CLVisit`** has its own `coordinate` and its own encoder — visit monitoring can leak
+  the real place.
+- **`CLRegion` / geofences** are evaluated inside locationd against the true position, and
+  `CLCircularRegion` is not a `CLLocation`, so region crossings still fire for real.
+
+Both are reachable as extensions of the same daemon hook if they matter.
+
+### Other properties worth knowing
+
+- **Not defeated: injected-image detection.** `_dyld_image_count` / `_dyld_get_image_name`
+  in locationd would list `GeoShim.dylib`. Not a concern for a third-party app (it cannot
+  walk locationd's image list), but stated for completeness.
 - **Class identity, in `clean`/`passthrough` mode with the subclass fallback.** If the
-  private initializer is not available, `object_getClass()` on a delivered location
-  returns `GSLocation`, not `CLLocation`. `isKindOfClass:` is satisfied; an exact class
-  comparison is not. The default `nil` mode returns a genuine `CLLocation` and does not
-  have this property.
-- **Corroboration.** Wi-Fi BSSIDs in range, serving cell MCC/MNC/LAC/CID, IP
-  geolocation, device timezone and barometric altitude all still describe where the
-  phone actually is. A server-side check against any of them is unaffected by anything
-  that happens inside `CLLocationManager`.
-- **Sensor disagreement.** `CMMotionActivity` reports stationary while your position
-  advances at highway speed. Route mode makes the location trace plausible *in
-  isolation*; it does not fabricate matching accelerometer data.
-- **Region and beacon callbacks.** `didEnterRegion`, `didExitRegion`, `didVisit`,
-  beacon ranging and the rest of the delegate surface are not intercepted, so geofences
-  still fire against the real position. Phase 3, if ever.
-
-It also has consequences worth knowing:
-
-- **The daemon hook is system-wide by design.** When it is active, *every* location
-  client is spoofed at once — you cannot spoof one app and leave another real through the
-  daemon path. Per-app control only exists on the client-injection side.
-- **`encodeWithCoder:` replacement is broad within locationd.** Any outbound fix with a
-  valid coordinate is rewritten, including ones locationd archives for its own use — so
-  Settings → Privacy → Location → System Services → Significant Locations will accumulate
+  private `sourceInformation` initializer is unavailable, a delivered location's class is
+  `GSLocation`, not `CLLocation`; `isKindOfClass:` passes, an exact class comparison does
+  not. The default `nil` mode returns a genuine `CLLocation` and avoids this.
+- **System-wide by design.** While active, *every* location client is spoofed at once;
+  there is no per-app control on the daemon path.
+- **`encodeWithCoder:` replacement is broad within locationd.** Every outbound fix with a
+  valid coordinate is rewritten, including ones locationd archives for itself — so
+  Settings → Privacy → Location → System Services → Significant Locations accumulates
   spoofed entries while spoofing is on. Invalid-coordinate objects (regions, visits) are
-  left alone, but this is a wider brush than a single client hook.
+  left alone.
+
+**Bottom line for this iPad:** the realistic ways an app still learns the true location
+are the **connected Wi-Fi BSSID** and **CoreBluetooth (iBeacons)**. Both live above
+CoreLocation; closing them is a separate effort (hooking `CNCopyCurrentNetworkInfo` /
+Bluetooth), not something the locationd hook can reach.
 
 The failure mode for this kind of tool is a user who believes it is stronger than it is.
 
