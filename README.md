@@ -249,29 +249,52 @@ specific apps in **Settings → GeoShim → Apps**. `geoshim status` pings locat
 asserts it is serving the configured coordinate, and prints the configured prefs including
 the master switch and the excluded apps.
 
+### Machine-readable status
+
+`geoshim status --json` prints the whole snapshot as one JSON object. The Settings page uses
+this, which is why the GUI never reimplements the ping / fingerprint / hook logic — the CLI
+is the single source of truth:
+
+```json
+{"daemon_alive":true,"enabled":true,"cl_hook":true,"visit_hook":true,"serving":true,"has_coordinate":true,"latitude":41.29840,"longitude":-81.75881}
+```
+
+| Field | Meaning |
+|---|---|
+| `daemon_alive` | the tweak answered the ping — it is loaded in `locationd` |
+| `enabled` | spoofing is on (the daemon's live state if it answered, else the plist) |
+| `cl_hook` / `visit_hook` | the `CLLocation` / `CLVisit` `encodeWithCoder:` hooks are installed |
+| `serving` | the daemon is enabled **and** its live coordinate matches the plist (the assertion) |
+| `has_coordinate` | a coordinate has been set |
+| `latitude` / `longitude` | the configured coordinate (decimal degrees) |
+
+Any field is `false`/`0` when unknown (e.g. all-false when `locationd` doesn't answer).
+
 ### The Settings panel
 
 Everything the CLI does is also on the **Settings → GeoShim** page (a PreferenceLoader
 entry backed by the `GeoShimPrefs` bundle), so you never need a terminal for day-to-day
 use:
 
-- **Status** — a live read-only readout of the current **state** (enabled/disabled),
-  **coordinate**, and a **locationd** line that actually pings the daemon and asserts it is
-  serving the configured coordinate. Refreshed each time the page appears.
-- **Spoofing → Enabled** — the master `Enabled` switch. Flipping it writes the prefs and
-  posts the reload notification, so `locationd` applies it live, exactly like
-  `geoshim start`/`stop`.
-- **Set location on map…** — a full-screen **MapKit** picker. Pan the map under the
-  crosshair (the live coordinate shows at the bottom) and tap **Save**; it writes
-  `Latitude`/`Longitude` to the domain and posts the reload. It opens centred on the
-  current coordinate.
-- **App-side fallback** — the `AppFallback` master switch plus the **Apps** picker
-  (AltList). The fallback is on for every app by default, so the picker is an **exclusion**
-  list: an app switched **off** is written to the `DisabledBundles` array the `geoshim
-  fallback` command and the tweak's self-gate share.
+- **Status** — three live rows read from `geoshim status --json`, refreshed on appear, on the
+  reload notification, and on a 2 s poll: **Hook State** (is the tweak loaded and responding
+  in `locationd`), **Spoofing State** (`on` / `off`, or `on (daemon coordinate differs)`), and
+  **Coordinate**. Because they come from the daemon rather than the plist, they never lie.
+- **Spoofing → Enabled** — the one toggle. It runs the real `geoshim start` / `geoshim stop`
+  (Preferences gets a libSandy exec grant on the binary), so it drives the exact same path as
+  the CLI and its displayed value comes from the daemon. There is deliberately no GUI toggle
+  for the app-side hook — use `geoshim fallback on|off`.
+- **Set location on map…** — a full-screen **MapKit** picker. Pan the map under the crosshair
+  (the live coordinate shows at the bottom) and tap **Save**; it writes the coordinate and
+  posts the reload, and the daemon bounces to serve it. It opens centred on the current
+  coordinate.
+- **App-side fallback → Apps** — the AltList exclusion picker. The fallback is on for every
+  app by default, so an app switched **off** here is written to the `DisabledBundles` array
+  the `geoshim fallback` command and the tweak's self-gate share.
 
-The panel reads and writes the `xyz.regulad.geoshim` domain through `cfprefsd` — the same
-plist the tweak and CLI read — so the two stay in sync.
+The status rows and the Enabled switch go through the `geoshim` CLI (spawned with the libSandy
+exec grant), so the GUI never reimplements state logic or reads a stale preference cache. The
+Apps picker still writes the `xyz.regulad.geoshim` domain through `cfprefsd`.
 
 The tool writes the plist (readable by `mobile`) and posts
 `xyz.regulad.geoshim/prefsChanged`. `locationd` re-reads it live via a Darwin-notification
