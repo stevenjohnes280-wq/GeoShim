@@ -24,7 +24,7 @@ static void usage(void) {
         "  geoshim start -x <lat> -y <lon> [-a <alt>] [options]\n"
         "  geoshim stop\n"
         "  geoshim fallback <on|off>\n"
-        "  geoshim status\n"
+        "  geoshim status [--json]\n"
         "\n"
         "fallback toggles the app-side hooks (normally on for every app; the\n"
         "picker in Settings excludes specific apps). The locationd path is always\n"
@@ -206,7 +206,51 @@ static BOOL pingDaemon(uint64_t *stateOut, double timeoutSec) {
     return responded;
 }
 
-static int commandStatus(void) {
+// Everything the GUI needs, computed once here so the state interpretation
+// (ping, hook bits, coordinate fingerprint match) lives in one place. `serving`
+// means the daemon is enabled AND its live coordinate matches the plist.
+static NSDictionary *statusSnapshot(void) {
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:GS_PREFS_PATH];
+    uint64_t st = 0;
+    BOOL alive = pingDaemon(&st, 0.7);
+    BOOL daemonEnabled = (st & GS_STATUS_ENABLED) != 0;
+    BOOL clHook = (st & GS_STATUS_CL_HOOK) != 0;
+    BOOL visitHook = (st & GS_STATUS_VISIT_HOOK) != 0;
+    BOOL hasCoord = (prefs[@"Latitude"] != nil && prefs[@"Longitude"] != nil);
+    double lat = [prefs[@"Latitude"] doubleValue];
+    double lon = [prefs[@"Longitude"] doubleValue];
+
+    BOOL serving = NO;
+    if (alive && daemonEnabled && hasCoord) {
+        uint32_t expected = gs_coord_fingerprint(lat, lon);
+        uint32_t reported = (uint32_t)((st >> GS_STATUS_FP_SHIFT) & GS_STATUS_FP_MASK);
+        serving = (reported == expected);
+    }
+    // Effective enabled: what the daemon reports if it is live, else the plist.
+    BOOL enabled = alive ? daemonEnabled : [prefs[@"Enabled"] boolValue];
+
+    return @{
+        @"daemon_alive": @(alive),
+        @"enabled": @(enabled),
+        @"cl_hook": @(clHook),
+        @"visit_hook": @(visitHook),
+        @"serving": @(serving),
+        @"has_coordinate": @(hasCoord),
+        @"latitude": @(lat),
+        @"longitude": @(lon),
+    };
+}
+
+static int commandStatusJSON(void) {
+    NSData *d = [NSJSONSerialization dataWithJSONObject:statusSnapshot() options:0 error:NULL];
+    if (d) fwrite(d.bytes, 1, d.length, stdout);
+    printf("\n");
+    return 0;
+}
+
+static int commandStatus(NSArray<NSString *> *args) {
+    if ([args containsObject:@"--json"]) return commandStatusJSON();
+
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:GS_PREFS_PATH];
 
     // Live daemon check first: this actually contacts locationd.
@@ -281,7 +325,7 @@ int main(int argc, char *argv[]) {
         if ([command isEqualToString:@"start"])    return commandStart(args);
         if ([command isEqualToString:@"stop"])     return commandStop();
         if ([command isEqualToString:@"fallback"]) return commandFallback(args);
-        if ([command isEqualToString:@"status"])   return commandStatus();
+        if ([command isEqualToString:@"status"])   return commandStatus(args);
 
         usage();
         return 1;
