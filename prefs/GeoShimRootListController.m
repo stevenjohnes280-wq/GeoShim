@@ -1,13 +1,14 @@
 // GeoShim Settings page. The app picker is AltList's
 // ATLApplicationListMultiSelectionController, driven from Root.plist (the same
-// framework Choicy and Shadow use). Alongside it this controller shows a live
-// status readout (state / coordinate / a locationd assertion) and pushes
-// GeoShimMapController for setting the coordinate on a map.
+// framework Choicy and Shadow use). Alongside it this controller shows a live,
+// polled status readout and pushes GeoShimMapController for the map picker.
 //
-// The status rows refresh three ways so the locationd line never gets stuck:
-// on page-appear, on the prefsChanged Darwin notification (so toggling spoofing
-// updates it at once), and on a 2 s poll while the page is visible. The locationd
-// ping runs off the main thread so the UI never blocks.
+// The status is read from locationd itself, not the plist, so it never lies the
+// way the Enabled switch (a write-only input) can. Two rows come straight from a
+// daemon ping - "Hook State" (is the tweak loaded/responding in locationd) and
+// "Spoofing State" (is spoofing actually on, and serving the configured
+// coordinate). Both refresh on page-appear, on the prefsChanged notification,
+// and on a 2 s poll. The ping runs off the main thread so the UI never blocks.
 
 #import "GeoShimRootListController.h"
 #import "GeoShimMapController.h"
@@ -17,7 +18,8 @@
 static NSString *const kGSDomain = @"xyz.regulad.geoshim";
 
 @implementation GeoShimRootListController {
-    NSString *_locationdStatus;
+    NSString *_hookState;
+    NSString *_spoofState;
     NSTimer *_pollTimer;
     BOOL _observing;
 }
@@ -33,7 +35,7 @@ static void gs_settingsPrefsChanged(CFNotificationCenterRef center, void *observ
                                     CFStringRef name, const void *object,
                                     CFDictionaryRef userInfo) {
     GeoShimRootListController *ctrl = (__bridge GeoShimRootListController *)observer;
-    dispatch_async(dispatch_get_main_queue(), ^{ [ctrl refreshStatus]; });
+    dispatch_async(dispatch_get_main_queue(), ^{ [ctrl onExternalChange]; });
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -82,9 +84,8 @@ static void gs_settingsPrefsChanged(CFNotificationCenterRef center, void *observ
     return v ? (__bridge_transfer id)v : nil;
 }
 
-// Ping the tweak inside locationd and wait briefly for it to answer. Mirrors the
-// CLI's pingDaemon; the shared fingerprint lives in GSCommon.h so both sides
-// agree. Runs off the main thread (see refreshStatus).
+// Ping the tweak inside locationd and wait briefly for a reply. Mirrors the CLI's
+// pingDaemon; the shared fingerprint lives in GSCommon.h so both sides agree.
 - (BOOL)gs_pingDaemon:(uint64_t *)stateOut timeout:(double)timeoutSec {
     int token = -1;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
@@ -105,42 +106,69 @@ static void gs_settingsPrefsChanged(CFNotificationCenterRef center, void *observ
     return responded;
 }
 
-- (NSString *)computeLocationdStatus {
-    uint64_t st = 0;
-    if (![self gs_pingDaemon:&st timeout:0.5]) return @"not responding";
-    if (!(st & GS_STATUS_ENABLED)) return @"live (disabled)";
-    id la = [self gs_read:@"Latitude"];
-    id lo = [self gs_read:@"Longitude"];
-    if (![la isKindOfClass:[NSNumber class]] || ![lo isKindOfClass:[NSNumber class]]) return @"live";
-    uint32_t expected = gs_coord_fingerprint([la doubleValue], [lo doubleValue]);
-    uint32_t reported = (uint32_t)((st >> GS_STATUS_FP_SHIFT) & GS_STATUS_FP_MASK);
-    return (reported == expected) ? @"serving this coordinate" : @"value differs";
+- (NSString *)hookStateFromPing:(BOOL)alive state:(uint64_t)st {
+    if (!alive) return @"not loaded";
+    if (!(st & GS_STATUS_CL_HOOK)) return @"loaded, CLLocation hook MISSING";
+    if (!(st & GS_STATUS_VISIT_HOOK)) return @"loaded (no visit hook)";
+    return @"loaded";
 }
 
-// Reload the read-only status rows: State/Coordinate immediately (cheap CFPrefs
-// reads) and the locationd line via an async ping so the main thread never blocks.
+- (NSString *)spoofStateFromPing:(BOOL)alive state:(uint64_t)st {
+    if (!alive) return @"unknown (daemon not responding)";
+    if (!(st & GS_STATUS_ENABLED)) return @"off";
+    id la = [self gs_read:@"Latitude"];
+    id lo = [self gs_read:@"Longitude"];
+    if ([la isKindOfClass:[NSNumber class]] && [lo isKindOfClass:[NSNumber class]]) {
+        uint32_t expected = gs_coord_fingerprint([la doubleValue], [lo doubleValue]);
+        uint32_t reported = (uint32_t)((st >> GS_STATUS_FP_SHIFT) & GS_STATUS_FP_MASK);
+        if (reported != expected) return @"on (daemon coordinate differs)";
+    }
+    return @"on";
+}
+
+// Coordinate is a cheap plist read; Hook/Spoofing come from one async daemon ping
+// so the main thread never blocks. Only rows whose text actually changed reload.
 - (void)refreshStatus {
-    PSSpecifier *stateSpec = [self specifierForID:@"statusState"];
-    if (stateSpec) [self reloadSpecifier:stateSpec animated:NO];
     PSSpecifier *coordSpec = [self specifierForID:@"statusCoordinate"];
     if (coordSpec) [self reloadSpecifier:coordSpec animated:NO];
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        NSString *status = [self computeLocationdStatus];
+        uint64_t st = 0;
+        BOOL alive = [self gs_pingDaemon:&st timeout:0.5];
+        NSString *hook = [self hookStateFromPing:alive state:st];
+        NSString *spoof = [self spoofStateFromPing:alive state:st];
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (![status isEqualToString:self->_locationdStatus]) {
-                self->_locationdStatus = status;
-                PSSpecifier *spec = [self specifierForID:@"statusLocationd"];
-                if (spec) [self reloadSpecifier:spec animated:NO];
+            if (![hook isEqualToString:self->_hookState]) {
+                self->_hookState = hook;
+                PSSpecifier *s = [self specifierForID:@"statusHook"];
+                if (s) [self reloadSpecifier:s animated:NO];
+            }
+            if (![spoof isEqualToString:self->_spoofState]) {
+                self->_spoofState = spoof;
+                PSSpecifier *s = [self specifierForID:@"statusSpoofing"];
+                if (s) [self reloadSpecifier:s animated:NO];
             }
         });
     });
 }
 
+// The prefsChanged notification also means the Enabled switch may be stale (e.g.
+// a `geoshim start/stop` flipped it), so correct the switch too - only here, not
+// on the 2 s poll, so it never fights a live toggle.
+- (void)onExternalChange {
+    PSSpecifier *sw = [self specifierForID:@"enabledSwitch"];
+    if (sw) [self reloadSpecifier:sw animated:NO];
+    [self refreshStatus];
+}
+
 #pragma mark - Status readout (Root.plist `get` selectors)
 
-- (id)statusState:(PSSpecifier *)specifier {
-    return [[self gs_read:@"Enabled"] boolValue] ? @"Enabled" : @"Disabled";
+- (id)statusHook:(PSSpecifier *)specifier {
+    return _hookState ?: @"checking…";
+}
+
+- (id)statusSpoofing:(PSSpecifier *)specifier {
+    return _spoofState ?: @"checking…";
 }
 
 - (id)statusCoordinate:(PSSpecifier *)specifier {
@@ -148,10 +176,6 @@ static void gs_settingsPrefsChanged(CFNotificationCenterRef center, void *observ
     id lo = [self gs_read:@"Longitude"];
     if (![la isKindOfClass:[NSNumber class]] || ![lo isKindOfClass:[NSNumber class]]) return @"—";
     return [NSString stringWithFormat:@"%.5f, %.5f", [la doubleValue], [lo doubleValue]];
-}
-
-- (id)statusLocationd:(PSSpecifier *)specifier {
-    return _locationdStatus ?: @"checking…";
 }
 
 #pragma mark - Map picker (Root.plist `action`)

@@ -8,27 +8,40 @@
 	<key>items</key>
 	<array>
 
-		<!-- Live status. The rows refresh on appear, on the prefsChanged
-		     notification, and on a 2 s poll (see GeoShimRootListController), so
-		     the locationd line tracks spoofing changes instead of getting stuck.
-		     The footer is the disclaimer: this only covers the public API. -->
+		<!-- Live status, read from locationd (not the plist) so it can't lie.
+		     Hook State and Spoofing State come from a daemon ping; all three rows
+		     refresh on appear, on the prefsChanged notification, and on a 2 s poll
+		     (see GeoShimRootListController). The footer is the disclaimer: this
+		     only covers the public API. -->
 		<dict>
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
 			<string>Status</string>
 			<key>footerText</key>
-			<string>This value is only served via the public CoreLocation API. Apps that read location through a private, first-party path (for example Apple Maps) are not affected.</string>
+			<string>The spoofed location is only served via the public CoreLocation API. Apps that read location through a private, first-party path (for example Apple Maps) are not affected.</string>
 		</dict>
 		<dict>
 			<key>cell</key>
 			<string>PSTitleValueCell</string>
 			<key>id</key>
-			<string>statusState</string>
+			<string>statusHook</string>
 			<key>label</key>
-			<string>State</string>
+			<string>Hook State</string>
 			<key>get</key>
-			<string>statusState:</string>
+			<string>statusHook:</string>
+			<key>enabled</key>
+			<false/>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSTitleValueCell</string>
+			<key>id</key>
+			<string>statusSpoofing</string>
+			<key>label</key>
+			<string>Spoofing State</string>
+			<key>get</key>
+			<string>statusSpoofing:</string>
 			<key>enabled</key>
 			<false/>
 		</dict>
@@ -44,22 +57,12 @@
 			<key>enabled</key>
 			<false/>
 		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSTitleValueCell</string>
-			<key>id</key>
-			<string>statusLocationd</string>
-			<key>label</key>
-			<string>locationd</string>
-			<key>get</key>
-			<string>statusLocationd:</string>
-			<key>enabled</key>
-			<false/>
-		</dict>
 
-		<!-- Spoofing master switch. Writes Enabled to the domain and posts the
-		     reload notification, so locationd applies it live (same as
-		     `geoshim start`/`stop`). -->
+		<!-- The only toggle: spoofing on/off. Writes Enabled to the domain and
+		     posts the reload notification, so locationd applies it live and
+		     bounces itself (same as `geoshim start`/`stop`). The controller
+		     reloads this switch on that notification so a CLI change can't leave
+		     it stale. There is deliberately no GUI toggle for the app-side hook. -->
 		<dict>
 			<key>cell</key>
 			<string>PSGroupCell</string>
@@ -71,6 +74,8 @@
 		<dict>
 			<key>cell</key>
 			<string>PSSwitchCell</string>
+			<key>id</key>
+			<string>enabledSwitch</string>
 			<key>label</key>
 			<string>Enabled</string>
 			<key>defaults</key>
@@ -91,11 +96,12 @@
 			<string>openMap</string>
 		</dict>
 
-		<!-- App-side fallback: the master toggle plus the AltList picker. The
-		     fallback is normally ON for every app; the picker is an exclusion
-		     list. AltList stores the bundles whose switch differs from the
-		     default, so with defaultApplicationSwitchValue = true the saved
-		     DisabledBundles array is exactly the apps switched OFF. -->
+		<!-- Per-app exclusion for the app-side fallback. The fallback is on for
+		     every app by default (there is no GUI toggle for it - manage that with
+		     `geoshim fallback on|off`); this picker only chooses apps to leave
+		     out. AltList stores the bundles whose switch differs from the default,
+		     so with defaultApplicationSwitchValue = true the saved DisabledBundles
+		     array is exactly the apps switched OFF. -->
 		<dict>
 			<key>cell</key>
 			<string>PSGroupCell</string>
@@ -103,20 +109,6 @@
 			<string>App-side fallback</string>
 			<key>footerText</key>
 			<string>The in-process fallback is on for every app by default (it adds a synthetic update timer for apps that permit tweak injection; locationd already spoofs every app system-wide). Switch an app OFF here to exclude it. Changes apply on the app's next launch.</string>
-		</dict>
-		<dict>
-			<key>cell</key>
-			<string>PSSwitchCell</string>
-			<key>label</key>
-			<string>App-side fallback</string>
-			<key>defaults</key>
-			<string>xyz.regulad.geoshim</string>
-			<key>key</key>
-			<string>AppFallback</string>
-			<key>default</key>
-			<true/>
-			<key>PostNotification</key>
-			<string>xyz.regulad.geoshim/prefsChanged</string>
 		</dict>
 		<dict>
 			<key>cell</key>
