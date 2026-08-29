@@ -561,7 +561,10 @@ static void gs_restartLocationdIfCoordinateChanged(void) {
 
     GSLog(@"locationd: config changed - bouncing the daemon to force a clean re-grab");
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{ kill(getpid(), SIGKILL); });
+                   dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        GSLog(@"locationd: SIGKILL self now (launchd relaunches)");
+        kill(getpid(), SIGKILL);
+    });
 }
 
 static void gs_prefsChanged(CFNotificationCenterRef center, void *observer,
