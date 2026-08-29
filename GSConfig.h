@@ -27,6 +27,23 @@ typedef NS_ENUM(NSInteger, GSSourceInfoMode) {
 @interface GSConfig : NSObject
 
 @property (nonatomic, readonly) BOOL enabled;
+
+// Master switch for the in-process (app-side) CoreLocation hooks. On by default.
+// A load-time gate read in the tweak's constructor inside each app - the daemon
+// (locationd) path ignores it. Toggling it takes effect on an app's next launch,
+// since installed hooks cannot be cleanly removed. `geoshim fallback on|off`.
+@property (nonatomic, readonly) BOOL appFallback;
+
+// The set of app bundle identifiers the app-side fallback is switched on for,
+// chosen in Settings via the AltList picker (the EnabledBundles array, the same
+// per-app model VPNHide uses). Empty means no app is covered by the fallback.
+// The daemon path is unaffected and still spoofs every client.
+@property (nonatomic, readonly, copy) NSArray<NSString *> *enabledBundles;
+
+// YES when the app-side fallback should install in a process with this bundle
+// id: the master switch is on AND the bundle is in the picker's list.
+- (BOOL)appFallbackEnabledForBundle:(NSString *)bundleIdentifier;
+
 @property (nonatomic, readonly) CLLocationCoordinate2D coordinate;
 @property (nonatomic, readonly) CLLocationDistance altitude;
 @property (nonatomic, readonly) GSMode mode;

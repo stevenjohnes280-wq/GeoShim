@@ -13,6 +13,10 @@ TWEAK_NAME = GeoShim
 GeoShim_FILES = Tweak.x GSConfig.m GSLocationFactory.m GSRouteEngine.m
 GeoShim_CFLAGS = -fobjc-arc -Wall
 GeoShim_FRAMEWORKS = CoreLocation Foundation
+# libSandy (roothide fork): the app-side fallback applies a sandbox profile so
+# it can read the prefs plist from inside a sandboxed app. Only the app branch
+# calls it; locationd never does.
+GeoShim_LIBRARIES = sandy
 
 # The identifier lives in one place. Paths are resolved at runtime from the
 # binary's own location (GSPaths.m), so there is no compile-time prefix and no
@@ -27,4 +31,5 @@ endif
 include $(THEOS_MAKE_PATH)/tweak.mk
 
 SUBPROJECTS += cli
+SUBPROJECTS += prefs
 include $(THEOS_MAKE_PATH)/aggregate.mk

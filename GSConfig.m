@@ -4,6 +4,8 @@
 
 @interface GSConfig ()
 @property (nonatomic, readwrite) BOOL enabled;
+@property (nonatomic, readwrite) BOOL appFallback;
+@property (nonatomic, readwrite, copy) NSArray<NSString *> *enabledBundles;
 @property (nonatomic, readwrite) CLLocationCoordinate2D coordinate;
 @property (nonatomic, readwrite) CLLocationDistance altitude;
 @property (nonatomic, readwrite) GSMode mode;
@@ -45,6 +47,11 @@ static NSString *gs_string(NSDictionary *d, NSString *key, NSString *fallback) {
 + (instancetype)disabledConfig {
     GSConfig *c = [[GSConfig alloc] init];
     c.enabled = NO;
+    // Default ON: the app-side gate is on even when the plist is missing or
+    // unreadable, so the fallback hooks still install (they stay inert while
+    // Enabled is NO). Only an explicit AppFallback=false turns them off.
+    c.appFallback = YES;
+    c.enabledBundles = @[];
     c.coordinate = kCLLocationCoordinate2DInvalid;
     c.altitude = 0.0;
     c.mode = GSModeStatic;
@@ -66,6 +73,18 @@ static NSString *gs_string(NSDictionary *d, NSString *key, NSString *fallback) {
 
     GSConfig *c = [self disabledConfig];
     c.enabled = gs_bool(d, @"Enabled", NO);
+    c.appFallback = gs_bool(d, @"AppFallback", YES);
+
+    // EnabledBundles: the AltList picker writes an array of bundle-id strings.
+    // Filter to strings so a malformed plist cannot inject non-strings.
+    id bundles = d[@"EnabledBundles"];
+    if ([bundles isKindOfClass:[NSArray class]]) {
+        NSMutableArray<NSString *> *clean = [NSMutableArray array];
+        for (id b in bundles) {
+            if ([b isKindOfClass:[NSString class]] && [(NSString *)b length]) [clean addObject:b];
+        }
+        c.enabledBundles = clean;
+    }
 
     double lat = gs_number(d, @"Latitude", 0.0);
     double lon = gs_number(d, @"Longitude", 0.0);
@@ -117,6 +136,12 @@ static NSString *gs_string(NSDictionary *d, NSString *key, NSString *fallback) {
 
     c.generation = gGSGeneration;
     return c;
+}
+
+- (BOOL)appFallbackEnabledForBundle:(NSString *)bundleIdentifier {
+    if (!self.appFallback) return NO;
+    if (bundleIdentifier.length == 0) return NO;
+    return [self.enabledBundles containsObject:bundleIdentifier];
 }
 
 + (instancetype)loadFromDisk {

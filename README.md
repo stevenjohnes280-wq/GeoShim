@@ -10,6 +10,12 @@ gets its position from `locationd` over XPC — so hooking the daemon reaches th
 blacklisted app anyway. `locationd` is the one interception point that works against a
 process you cannot touch, and it is the reason this project exists.
 
+A second, **optional path** covers apps that *do* permit injection: an in-process
+CoreLocation fallback, scoped **per app** from a Settings picker and on by default as a
+subsystem. It adds what the daemon cannot — a synthetic update timer that keeps an app
+moving even when the real subsystem is silent — but the daemon stays the path that reaches
+the blacklisted target.
+
 It also cleanly defeats `sourceInformation.isSimulatedBySoftware`: tools built on
 `CLSimulationManager` (Xcode's DDI, `locsim`) deliver through the channel iOS marks as
 simulated, so on iOS 15+ every `CLLocation` they produce reports `isSimulatedBySoftware
@@ -28,10 +34,9 @@ log by `locationd: encode <real> -> <fake>`.
 
 ## How it works
 
-GeoShim injects **only into `locationd`** (the filter targets the `locationd` executable;
-the `%ctor` installs nothing and returns immediately in any other process). Inside the
-daemon it hooks the two points where an outbound, location-bearing object is serialized to
-a client.
+GeoShim has two paths and splits at load time by process. **The `locationd` daemon path is
+primary** — and the only one that reaches a roothide-blacklisted app. Inside the daemon it
+hooks the two points where an outbound, location-bearing object is serialized to a client.
 
 Positions leave `locationd` as an **NSSecureCoding keyed archive over XPC** (`bplist17`,
 confirmed by [8kSec's Frida teardown](https://8ksec.io/advanced-frida-usage-part-4-sniffing-location-data-from-locationd-in-ios/)
@@ -51,6 +56,39 @@ and on-device here), so the serializer is the chokepoint:
 
 Everything fails **open**: any nil/throw path encodes the real object untouched. A crash
 here is a crash in `locationd`, so every hook is nil-checked and wrapped.
+
+The CLI also pings this path: `geoshim status` posts a Darwin notification the daemon
+answers with its live state, so the tool can tell you the hook is *actually loaded in
+locationd* rather than just echoing the plist it wrote. No reply means the tweak isn't live.
+
+### The app-side fallback
+
+In an app that *does* permit injection, GeoShim also hooks CoreLocation in-process. This is
+redundancy plus the one thing the daemon cannot do: a **synthetic update timer** that keeps
+the app moving even when the real subsystem is silent (permission denied, GPS cold, or a
+poll-only client). It is scoped **per app** — nothing installs unless the app is switched on
+in **Settings → GeoShim → Apps** (an AltList picker, the same model VPNHide and Choicy use)
+while the master switch (`geoshim fallback`, on by default) is on.
+
+- **`-[CLLocationManager setDelegate:]`** — the delegate lives in the host app, so its
+  callbacks can't be hooked by name. On first sight of a delegate class GeoShim swizzles
+  `locationManager:didUpdateLocations:` and the legacy
+  `locationManager:didUpdateToLocation:fromLocation:` once, substituting the location
+  argument and calling on to the original.
+- **`-[CLLocationManager location]`** — for apps that poll rather than subscribe.
+- **`startUpdatingLocation` / `stopUpdatingLocation` / `requestLocation`** — drive the
+  synthetic timer. It skips a tick if a real callback landed within the last 1.5 intervals
+  (so the app is never fed two fixes for one moment) and delivers through the delegate's
+  *original* IMP, so its own delivery is never re-substituted or mistaken for a real fix.
+
+Reading the enable-list and coordinate from inside a sandboxed app is the interesting part:
+cfprefsd denies a foreign app the cross-domain read, so GeoShim applies a
+[libSandy](https://github.com/roothide/libSandy) profile
+(`layout/Library/libSandy/GeoShim.plist`) in its constructor, granting a sandbox file-read
+extension on the prefs plist and the staged route. The roothide libSandy fork runs
+`jbroot()` on the profile path before issuing the extension, and GeoShim reads those same
+`jbroot()`'d paths (`GSCommon.h`), so the grant and the read line up. The daemon path needs
+none of this — `locationd` reads the plist directly.
 
 ### Making the fix look real
 
@@ -93,14 +131,17 @@ for the class-identity caveat of strategy 2.
 
 | Path | What it is |
 |---|---|
-| `Tweak.x` | locationd-only: the `CLLocation` + `CLVisit` `encodeWithCoder:` swizzles and the `%ctor` |
+| `Tweak.x` | Both paths: the locationd `CLLocation`/`CLVisit` swizzles + status responder, and the app-side `CLLocationManager` fallback hooks |
 | `GSLocationFactory.{h,m}` | Builds the spoofed `CLLocation`; noise, accuracy, `sourceInformation` |
 | `GSRouteEngine.{h,m}` | GPX parsing, haversine cumulative distance, interpolation |
-| `GSConfig.{h,m}` | Preferences snapshot; Darwin-notification live reload |
-| `GSCommon.h` | Identifier, `jbroot()`-based paths, logging gate |
-| `cli/main.m` | The `geoshim` control tool |
+| `GSConfig.{h,m}` | Preferences snapshot (incl. `AppFallback` / `EnabledBundles`); Darwin-notification live reload |
+| `GSCommon.h` | Identifier, `jbroot()`-based paths, status-ping notify names, logging gate |
+| `cli/main.m` | The `geoshim` control tool (writes prefs, pings the daemon) |
 | `cli/entitlements.plist` | roothide `no-sandbox` entitlements for the CLI (see Building) |
-| `GeoShim.plist` | Injection filter — the `locationd` executable only |
+| `prefs/` | Settings bundle — the AltList app picker for the fallback |
+| `GeoShim.plist` | Injection filter — `locationd` **and** `CLLocationManager`-using apps |
+| `layout/Library/libSandy/GeoShim.plist` | libSandy profile granting the prefs/route file-read extension |
+| `layout/Library/PreferenceLoader/Preferences/GeoShim.plist` | Settings entry |
 | `examples/tokyo-loop.gpx` | A short loop for smoke-testing route mode |
 
 ---
@@ -121,6 +162,12 @@ sudo dnf install -y dpkg
 git clone --depth 1 https://github.com/ProcursusTeam/ldid.git && cd ldid
 make && sudo install -m 0755 ldid /usr/local/bin/ldid
 ```
+
+- **AltList and libSandy staged into Theos** — the Settings picker links AltList's
+  `ATLApplicationListMultiSelectionController`, and the tweak links `-lsandy` (roothide's
+  libSandy fork). roothide's Theos bundles both; if a link step fails, run AltList's
+  `install_to_theos.sh` once. These are also runtime `Depends` in `control`
+  (`com.opa334.altlist`, `com.opa334.libsandy`, `preferenceloader`).
 
 Then:
 
@@ -161,7 +208,7 @@ resolution — the symptom is `dyld: Library not loaded: @loader_path/.jbroot/us
 
 ```bash
 # copy the .deb over, then on-device:
-sudo apt install ./xyz.regulad.geoshim_0.1.0_iphoneos-arm64e.deb
+sudo apt install ./xyz.regulad.geoshim_0.2.0_iphoneos-arm64e.deb
 killall -9 locationd
 geoshim status
 ```
@@ -182,6 +229,7 @@ product. Just make sure Tweak Injection is enabled and you are not in safe mode
 geoshim start -x 35.6812 -y 139.7671 [-a 40.0] [options]
 geoshim route <file.gpx> [--speed 1.4] [--loop|--reverse|--stop]
 geoshim stop
+geoshim fallback <on|off>
 geoshim status
 ```
 
@@ -192,7 +240,12 @@ Options for `start`:
 | `--source-info <nil\|clean\|passthrough>` | how `CLLocation.sourceInformation` reads |
 | `--jitter <metres>` | per-update coordinate noise (default 2 m) |
 | `--debug-log-real` | log genuine fixes — needs a `GEOSHIM_DEBUG=1` build |
-| `--interval`, `--no-synthesize` | *inert in daemon-only mode* (legacy of the removed client timer) |
+| `--interval <s>`, `--no-synthesize` | synthetic-timer cadence / disable it — used by the app-side fallback |
+
+`geoshim fallback on|off` is the master switch for the app-side hooks (on by default); the
+locationd path is always active. Choose *which* apps the fallback covers in **Settings →
+GeoShim → Apps**. `geoshim status` pings locationd (see below) and prints both the live
+daemon state and the configured prefs, including the master switch and the picked apps.
 
 The tool writes the plist (readable by `mobile`) and posts
 `xyz.regulad.geoshim/prefsChanged`. `locationd` re-reads it live via a Darwin-notification
@@ -206,7 +259,9 @@ GPX with <https://mapstogpx.com/>.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `Enabled` | bool | false | Master switch |
+| `Enabled` | bool | false | Master switch for spoofing (both paths) |
+| `AppFallback` | bool | true | Master switch for the app-side hooks (`geoshim fallback`) |
+| `EnabledBundles` | array | `[]` | Bundle IDs the app-side fallback covers (set in Settings) |
 | `Latitude` / `Longitude` | real | — | Static coordinate; also the route fallback |
 | `Altitude` | real | 0 | Metres. Set it — 0 m in Denver is a tell |
 | `Mode` | string | `static` | `static` or `route` |
@@ -218,8 +273,9 @@ GPX with <https://mapstogpx.com/>.
 | `RouteSpeedMps` | real | 1.4 | Base speed; varied ±10% per tick |
 | `LogRealFixes` | bool | false | Debug builds only; logs genuine fixes |
 
-`UpdateIntervalSec` / `SynthesizeUpdates` are still parsed but do nothing in daemon-only
-mode. Anything unparseable — a missing plist, a bad coordinate, a route under two points —
+`UpdateIntervalSec` / `SynthesizeUpdates` drive the **app-side fallback's** synthetic
+timer; they do nothing on the daemon path, which only rewrites fixes `locationd` already
+emits. Anything unparseable — a missing plist, a bad coordinate, a route under two points —
 resolves to *disabled*, not an error. The tweak fails open by construction.
 
 ---
@@ -366,8 +422,10 @@ For this deployment (a **Wi-Fi-only iPad**, so anything cellular is not applicab
 - **Class identity** in `clean`/`passthrough` with the subclass fallback: a delivered
   location's class is `GSLocation`, not `CLLocation`; `isKindOfClass:` passes, an exact
   comparison does not. The default `nil` mode returns a genuine `CLLocation`.
-- **System-wide by design.** Every location client is spoofed at once; there is no per-app
-  control on the daemon path.
+- **System-wide by design on the daemon path.** `locationd` spoofs every client at once;
+  there is no per-app control there — and the roothide-blacklisted target is reachable
+  *only* by the daemon. The **app-side fallback** does add per-app control (the AltList
+  picker), but only for apps that permit injection, so it can never scope the target.
 - **`encodeWithCoder:` is broad within locationd.** Every valid-coordinate outbound fix is
   rewritten, including ones locationd archives for itself — so Settings → Privacy →
   Location → System Services → Significant Locations accumulates spoofed entries while on.

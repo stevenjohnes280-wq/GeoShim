@@ -5,14 +5,29 @@
 <dict>
   <key>Filter</key>
   <dict>
-    <!-- locationd only. It reaches every location client - including apps whose
-         own injection is blacklisted by roothide - because they all get their
-         positions from the daemon over XPC. Requires /usr/libexec/locationd to
-         be injectable (it is not on roothide's tweak-injection exclusion list). -->
+    <!-- Two match paths, combined with Mode = Any:
+
+         * Executables: locationd - the primary daemon path. It reaches every
+           location client (including apps whose own injection is blacklisted by
+           roothide) because they all get their positions from the daemon over
+           XPC. Requires /usr/libexec/locationd to be injectable (it is not on
+           roothide's tweak-injection exclusion list).
+
+         * Classes: CLLocationManager - loads into any process that uses
+           CoreLocation, i.e. exactly the apps the app-side fallback might cover.
+           The tweak still self-gates per app (AppFallback master switch + the
+           AltList EnabledBundles list), so loading here installs nothing unless
+           the app was picked in Settings. -->
     <key>Executables</key>
     <array>
       <string>locationd</string>
     </array>
+    <key>Classes</key>
+    <array>
+      <string>CLLocationManager</string>
+    </array>
+    <key>Mode</key>
+    <string>Any</string>
   </dict>
 </dict>
 </plist>

@@ -24,7 +24,11 @@ static void usage(void) {
         "  geoshim start -x <lat> -y <lon> [-a <alt>] [options]\n"
         "  geoshim route <file.gpx> [--speed <m/s>] [--loop|--reverse|--stop]\n"
         "  geoshim stop\n"
+        "  geoshim fallback <on|off>\n"
         "  geoshim status\n"
+        "\n"
+        "fallback toggles the app-side hooks (on by default); the locationd path\n"
+        "is always active. status pings locationd to confirm the hook is live.\n"
         "\n"
         "options:\n"
         "  --source-info <nil|clean|passthrough>  how CLLocation.sourceInformation reads\n"
@@ -245,6 +249,30 @@ static int commandRoute(NSArray<NSString *> *args) {
     return 0;
 }
 
+// The master switch for the app-side fallback. Independent of Enabled and of
+// the per-app EnabledBundles list (chosen in Settings): with this off, no app
+// installs the in-process hooks regardless of the picker. On by default.
+static int commandFallback(NSArray<NSString *> *args) {
+    if (args.count < 1) {
+        fprintf(stderr, "geoshim: usage: geoshim fallback <on|off>\n");
+        return 1;
+    }
+    NSMutableDictionary *prefs = readPrefs();
+    NSString *v = args[0];
+    if ([v isEqualToString:@"on"]) {
+        prefs[@"AppFallback"] = @YES;
+    } else if ([v isEqualToString:@"off"]) {
+        prefs[@"AppFallback"] = @NO;
+    } else {
+        fprintf(stderr, "geoshim: fallback must be on or off\n");
+        return 1;
+    }
+    if (!writePrefs(prefs)) return 1;
+    printf("geoshim: app-side fallback %s (applies on each app's next launch; "
+           "the locationd path is always active)\n", v.UTF8String);
+    return 0;
+}
+
 static int commandStop(void) {
     NSMutableDictionary *prefs = readPrefs();
     prefs[@"Enabled"] = @NO;
@@ -253,13 +281,52 @@ static int commandStop(void) {
     return 0;
 }
 
+// Ping the copy of the tweak inside locationd and wait briefly for it to answer.
+// Returns YES if it replied (and fills *stateOut with the packed GS_STATUS_*
+// bits); NO means the daemon hook is not loaded or not responding. This is the
+// only way the CLI can tell the tweak is actually live, rather than just echoing
+// the plist it wrote.
+static BOOL pingDaemon(uint64_t *stateOut, double timeoutSec) {
+    int token = -1;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    uint32_t r = notify_register_dispatch(GS_NOTIFY_STATUS_REPLY, &token,
+                                          dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0),
+                                          ^(int t) { (void)t; dispatch_semaphore_signal(sem); });
+    if (r != NOTIFY_STATUS_OK) return NO;
+
+    notify_post(GS_NOTIFY_STATUS_REQ);
+    long timedOut = dispatch_semaphore_wait(sem,
+                        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeoutSec * NSEC_PER_SEC)));
+    BOOL responded = (timedOut == 0);
+    if (responded && stateOut) {
+        uint64_t s = 0;
+        notify_get_state(token, &s);
+        *stateOut = s;
+    }
+    notify_cancel(token);
+    return responded;
+}
+
 static int commandStatus(void) {
+    // Live daemon check first: this actually contacts locationd.
+    uint64_t st = 0;
+    if (pingDaemon(&st, 0.7)) {
+        printf("daemon:      responding (locationd hook is live)\n");
+        printf("  enabled:   %s\n", (st & GS_STATUS_ENABLED) ? "yes" : "no");
+        printf("  cllocation hook: %s\n", (st & GS_STATUS_CL_HOOK) ? "installed" : "MISSING");
+        printf("  visit hook:      %s\n", (st & GS_STATUS_VISIT_HOOK) ? "installed" : "missing");
+        printf("  daemon mode:     %s\n", (st & GS_STATUS_ROUTE_MODE) ? "route" : "static");
+    } else {
+        printf("daemon:      NOT responding (tweak not loaded in locationd?)\n");
+    }
+
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:GS_PREFS_PATH];
     if (!prefs) {
-        printf("geoshim: no preferences at %s (never started)\n", GS_PREFS_PATH.UTF8String);
+        printf("config:      no preferences at %s (never started)\n", GS_PREFS_PATH.UTF8String);
         return 0;
     }
 
+    printf("\nconfiguration (from prefs):\n");
     BOOL enabled = [prefs[@"Enabled"] boolValue];
     printf("state:       %s\n", enabled ? "enabled" : "disabled");
     printf("mode:        %s\n", [prefs[@"Mode"] ?: @"static" UTF8String]);
@@ -271,6 +338,18 @@ static int commandStatus(void) {
     printf("interval:    %.2f s\n", [prefs[@"UpdateIntervalSec"] ?: @1.0 doubleValue]);
     printf("synthesize:  %s\n",
            (prefs[@"SynthesizeUpdates"] == nil || [prefs[@"SynthesizeUpdates"] boolValue]) ? "yes" : "no");
+
+    BOOL fallbackOn = (prefs[@"AppFallback"] == nil || [prefs[@"AppFallback"] boolValue]);
+    printf("app fallback:%s (master switch)\n", fallbackOn ? "on" : "off");
+    id bundles = prefs[@"EnabledBundles"];
+    if ([bundles isKindOfClass:[NSArray class]] && [bundles count]) {
+        printf("fallback apps: %lu picked in Settings\n", (unsigned long)[bundles count]);
+        for (id b in bundles) {
+            if ([b isKindOfClass:[NSString class]]) printf("             - %s\n", [b UTF8String]);
+        }
+    } else {
+        printf("fallback apps: none picked (Settings > GeoShim > Apps)\n");
+    }
 
     NSString *route = prefs[@"RoutePlistPath"];
     if (route.length) {
@@ -297,6 +376,7 @@ int main(int argc, char *argv[]) {
         if ([command isEqualToString:@"start"])  return commandStart(args);
         if ([command isEqualToString:@"route"])  return commandRoute(args);
         if ([command isEqualToString:@"stop"])   return commandStop();
+        if ([command isEqualToString:@"fallback"]) return commandFallback(args);
         if ([command isEqualToString:@"status"]) return commandStatus();
 
         usage();

@@ -1,9 +1,9 @@
 Package: xyz.regulad.geoshim
 Name: GeoShim
-Version: 0.1.0
+Version: 0.2.0
 Architecture: iphoneos-arm64e
 Description: System-wide location substitution via in-process CoreLocation hooks and a locationd interceptor
 Maintainer: regulad
 Author: regulad
 Section: Tweaks
-Depends: ellekit
+Depends: ellekit, preferenceloader, com.opa334.altlist, com.opa334.libsandy

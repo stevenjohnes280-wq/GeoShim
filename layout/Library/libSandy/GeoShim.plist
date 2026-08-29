@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  libSandy profile for the app-side fallback. Applied via
+  libSandy_applyProfile("GeoShim") in the tweak's constructor, in app processes
+  only, so a sandboxed app can read GeoShim's prefs and staged route.
+
+  roothide caveat: the roothide libSandy fork runs jbroot() on each extension
+  "path" before issuing it (sandyd/main.m), so the grant lands on the jbroot'd
+  path. Sandbox extensions match by path string, and GSCommon.h reads those same
+  jbroot()'d paths (GS_PREFS_PATH, GS_STATE_DIR), so the grant and the read line
+  up. The paths below are the plain /var/mobile forms; sandyd jbroot()s them.
+
+  The CLI (running unsandboxed as root) writes both, so read access is enough.
+-->
+<plist version="1.0">
+<dict>
+  <key>AllowedProcesses</key>
+  <array>
+    <string>*</string>
+  </array>
+  <key>Extensions</key>
+  <array>
+    <dict>
+      <key>type</key>
+      <string>file</string>
+      <key>extension_class</key>
+      <string>com.apple.app-sandbox.read</string>
+      <key>path</key>
+      <string>/var/mobile/Library/Preferences/xyz.regulad.geoshim.plist</string>
+    </dict>
+    <dict>
+      <key>type</key>
+      <string>file</string>
+      <key>extension_class</key>
+      <string>com.apple.app-sandbox.read</string>
+      <key>path</key>
+      <string>/var/mobile/Library/GeoShim</string>
+    </dict>
+  </array>
+</dict>
+</plist>

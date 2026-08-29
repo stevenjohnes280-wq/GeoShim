@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>title</key>
+	<string>GeoShim</string>
+	<key>items</key>
+	<array>
+
+		<!-- Live status, refreshed each time the page appears. Read-only; the
+		     values come from the get: selectors on the list controller. -->
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Status</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSTitleValueCell</string>
+			<key>label</key>
+			<string>State</string>
+			<key>get</key>
+			<string>statusState:</string>
+			<key>enabled</key>
+			<false/>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSTitleValueCell</string>
+			<key>label</key>
+			<string>Coordinate</string>
+			<key>get</key>
+			<string>statusCoordinate:</string>
+			<key>enabled</key>
+			<false/>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSTitleValueCell</string>
+			<key>label</key>
+			<string>Mode</string>
+			<key>get</key>
+			<string>statusMode:</string>
+			<key>enabled</key>
+			<false/>
+		</dict>
+
+		<!-- Spoofing master switch. Writes Enabled to the domain and posts the
+		     reload notification, so locationd applies it live (same as
+		     `geoshim start`/`stop`). -->
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Spoofing</string>
+			<key>footerText</key>
+			<string>Master switch for both paths. `geoshim start` and `geoshim stop` set this too.</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Enabled</string>
+			<key>defaults</key>
+			<string>xyz.regulad.geoshim</string>
+			<key>key</key>
+			<string>Enabled</string>
+			<key>default</key>
+			<false/>
+			<key>PostNotification</key>
+			<string>xyz.regulad.geoshim/prefsChanged</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>Set location on map…</string>
+			<key>action</key>
+			<string>openMap</string>
+		</dict>
+
+		<!-- App-side fallback: the master toggle plus the AltList per-app
+		     picker. Saves EnabledBundles to the xyz.regulad.geoshim domain
+		     (defaultApplicationSwitchValue false, so the saved array = the apps
+		     switched ON) - the exact key the tweak self-gates on. -->
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>App-side fallback</string>
+			<key>footerText</key>
+			<string>locationd already spoofs every app system-wide. The app-side fallback adds the in-process update timer (spoofed movement even when the real subsystem is silent) for the apps you pick - only apps that permit tweak injection. Changes apply on the app's next launch.</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>App-side fallback</string>
+			<key>defaults</key>
+			<string>xyz.regulad.geoshim</string>
+			<key>key</key>
+			<string>AppFallback</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>xyz.regulad.geoshim/prefsChanged</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSLinkListCell</string>
+			<key>detail</key>
+			<string>ATLApplicationListMultiSelectionController</string>
+			<key>label</key>
+			<string>Apps</string>
+			<key>defaults</key>
+			<string>xyz.regulad.geoshim</string>
+			<key>key</key>
+			<string>EnabledBundles</string>
+			<key>defaultApplicationSwitchValue</key>
+			<false/>
+			<key>useSearchBar</key>
+			<true/>
+			<key>showIdentifiersAsSubtitle</key>
+			<true/>
+			<key>sections</key>
+			<array>
+				<dict>
+					<key>sectionType</key>
+					<string>User</string>
+				</dict>
+				<dict>
+					<key>sectionType</key>
+					<string>System</string>
+				</dict>
+			</array>
+		</dict>
+
+	</array>
+</dict>
+</plist>

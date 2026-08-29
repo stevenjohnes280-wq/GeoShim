@@ -1,7 +1,7 @@
 # Managed by the Probot "Settings" app (github.com/repository-settings/app).
 # Editing this file and pushing it to the default branch updates the repo.
 repository:
-  name: geoshim
+  name: GeoShim
   description: >-
     System-wide iOS location spoofing by hooking locationd, so it reaches
     roothide-blacklisted apps that block tweak injection. Rewrites
