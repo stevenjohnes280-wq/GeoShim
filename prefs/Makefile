@@ -3,7 +3,7 @@ include $(THEOS)/makefiles/common.mk
 BUNDLE_NAME = GeoShimPrefs
 GeoShimPrefs_FILES = GeoShimRootListController.m GeoShimMapController.m
 GeoShimPrefs_INSTALL_PATH = /Library/PreferenceBundles
-GeoShimPrefs_CFLAGS = -fobjc-arc
+GeoShimPrefs_CFLAGS = -fobjc-arc -I..
 GeoShimPrefs_FRAMEWORKS = UIKit MapKit CoreLocation
 GeoShimPrefs_PRIVATE_FRAMEWORKS = Preferences
 # AltList provides the app picker (ATLApplicationListMultiSelectionController).

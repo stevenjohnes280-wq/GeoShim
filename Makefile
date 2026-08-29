@@ -10,7 +10,7 @@ INSTALL_TARGET_PROCESSES = locationd
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = GeoShim
-GeoShim_FILES = Tweak.x GSConfig.m GSLocationFactory.m GSRouteEngine.m
+GeoShim_FILES = Tweak.x GSConfig.m GSLocationFactory.m
 GeoShim_CFLAGS = -fobjc-arc -Wall
 GeoShim_FRAMEWORKS = CoreLocation Foundation
 # libSandy (roothide fork): the app-side fallback applies a sandbox profile so

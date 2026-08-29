@@ -1,9 +1,28 @@
 #import "GSLocationFactory.h"
-#import "GSRouteEngine.h"
 #import "GSConfig.h"
 #import "GSCommon.h"
 #import <os/lock.h>
 #import <objc/runtime.h>
+
+// Relocated from the (removed) route engine: the one geodesic helper static
+// spoofing still needs, to offset the coordinate by a few metres of jitter.
+static const double kMetresPerDegreeLat = 111320.0;
+
+// Metres -> degrees. cos(lat) collapses at the poles, so clamp it: at 89.9 deg
+// the guard caps a 1 m east offset at about 0.0005 deg of longitude instead of
+// letting it run away.
+static CLLocationCoordinate2D gs_offsetMetres(CLLocationCoordinate2D c, double dNorth, double dEast) {
+    double latRad = c.latitude * M_PI / 180.0;
+    double cosLat = fmax(0.01, fabs(cos(latRad)));
+    CLLocationCoordinate2D out;
+    out.latitude = c.latitude + dNorth / kMetresPerDegreeLat;
+    out.longitude = c.longitude + dEast / (kMetresPerDegreeLat * cosLat);
+    if (out.latitude > 90.0) out.latitude = 90.0;
+    if (out.latitude < -90.0) out.latitude = -90.0;
+    if (out.longitude > 180.0) out.longitude -= 360.0;
+    if (out.longitude < -180.0) out.longitude += 360.0;
+    return out;
+}
 
 #pragma mark - sourceInformation attachment
 
@@ -188,6 +207,7 @@ static double gs_clamp(double v, double lo, double hi) {
     os_unfair_lock _lock;
     double _hAcc;
     double _vAcc;
+    double _altWalk;   // barometric drift around the configured altitude
     CLLocation *_lastReal;
     NSDate *_lastRealLogged;
     CLLocationSourceInformation *_cleanSourceInfo;
@@ -289,27 +309,16 @@ static double gs_clamp(double v, double lo, double hi) {
         CLLocationCoordinate2D base = config.coordinate;
         CLLocationDirection course = -1.0;
         CLLocationSpeed speed = 0.0;
-        BOOL moving = NO;
-
-        if (config.mode == GSModeRoute) {
-            GSRouteSample s = [[GSRouteEngine shared] sampleForConfig:config atDate:now];
-            if (s.valid) {
-                base = s.coordinate;
-                course = s.course;
-                speed = s.speed;
-                moving = !s.finished && s.speed > 0.05;
-            }
-            // An unreadable or too-short route falls through to the static
-            // coordinate rather than producing nothing.
-        }
+        BOOL moving = NO;   // static spoofing: the fix never moves under its own power
 
         if (!CLLocationCoordinate2DIsValid(base)) return nil;
 
-        // Real GPS never returns the identical coordinate twice.
+        // Real GPS never returns the identical coordinate twice. The jitter (the
+        // configurable uncertainty) keeps the fix wandering by a few metres.
         double jitter = config.jitterMetres;
         CLLocationCoordinate2D coord = base;
         if (jitter > 0.0) {
-            coord = GSOffsetMetres(base, gs_gaussian(0.0, jitter), gs_gaussian(0.0, jitter));
+            coord = gs_offsetMetres(base, gs_gaussian(0.0, jitter), gs_gaussian(0.0, jitter));
         }
         if (!CLLocationCoordinate2DIsValid(coord)) coord = base;
 
@@ -320,8 +329,12 @@ static double gs_clamp(double v, double lo, double hi) {
         // firms up or degrades.
         _hAcc = gs_clamp(_hAcc + gs_gaussian(0.0, 1.2), 5.0, 65.0);
         _vAcc = gs_clamp(_vAcc + gs_gaussian(0.0, 0.4), 3.0, 10.0);
+        // Altitude drifts like a barometric altimeter: a bounded random walk
+        // around the configured value rather than a frozen reading.
+        _altWalk = gs_clamp(_altWalk + gs_gaussian(0.0, 0.25), -8.0, 8.0);
         double hAcc = _hAcc;
         double vAcc = _vAcc;
+        double altWalk = _altWalk;
 
         CLLocationSourceInformation *sourceInfo = [self sourceInfoForMode:config.sourceInfoMode];
         os_unfair_lock_unlock(&_lock);
@@ -338,9 +351,9 @@ static double gs_clamp(double v, double lo, double hi) {
             ? gs_clamp(gs_gaussian(12.0, 5.0), 3.0, 40.0)
             : -1.0;
 
-        // Altitude noise of about half a metre; a barometric-aided fix is
-        // quiet but not frozen.
-        double altitude = config.altitude + gs_gaussian(0.0, 0.5);
+        // Barometric drift (the bounded walk above) plus a little per-fix noise;
+        // a real altimeter is quiet but never frozen.
+        double altitude = config.altitude + altWalk + gs_gaussian(0.0, 0.15);
 
         CLLocation *loc = gs_locationWithSourceInfo(coord, altitude, hAcc, vAcc,
                                                     course, courseAcc, speed, speedAcc,

@@ -11,10 +11,13 @@ blacklisted app anyway. `locationd` is the one interception point that works aga
 process you cannot touch, and it is the reason this project exists.
 
 A second, **optional path** covers apps that *do* permit injection: an in-process
-CoreLocation fallback, scoped **per app** from a Settings picker and on by default as a
-subsystem. It adds what the daemon cannot — a synthetic update timer that keeps an app
-moving even when the real subsystem is silent — but the daemon stays the path that reaches
-the blacklisted target.
+CoreLocation fallback that is **on by default for every app** (exclude specific apps from a
+Settings picker). It adds what the daemon cannot — a synthetic update timer that keeps an
+app moving even when the real subsystem is silent — but the daemon stays the path that
+reaches the blacklisted target.
+
+GeoShim is **static only**: it holds one configured coordinate (with realistic per-fix
+uncertainty), not routes.
 
 It also cleanly defeats `sourceInformation.isSimulatedBySoftware`: tools built on
 `CLSimulationManager` (Xcode's DDI, `locsim`) deliver through the channel iOS marks as
@@ -66,9 +69,9 @@ locationd* rather than just echoing the plist it wrote. No reply means the tweak
 In an app that *does* permit injection, GeoShim also hooks CoreLocation in-process. This is
 redundancy plus the one thing the daemon cannot do: a **synthetic update timer** that keeps
 the app moving even when the real subsystem is silent (permission denied, GPS cold, or a
-poll-only client). It is scoped **per app** — nothing installs unless the app is switched on
-in **Settings → GeoShim → Apps** (an AltList picker, the same model VPNHide and Choicy use)
-while the master switch (`geoshim fallback`, on by default) is on.
+poll-only client). It is **normally on for every app**: it installs unless the app is
+switched **off** in **Settings → GeoShim → Apps** (an AltList picker, the same model VPNHide
+and Choicy use) or the master switch (`geoshim fallback`, on by default) is off.
 
 - **`-[CLLocationManager setDelegate:]`** — the delegate lives in the host app, so its
   callbacks can't be hooked by name. On first sight of a delegate class GeoShim swizzles
@@ -81,32 +84,30 @@ while the master switch (`geoshim fallback`, on by default) is on.
   (so the app is never fed two fixes for one moment) and delivers through the delegate's
   *original* IMP, so its own delivery is never re-substituted or mistaken for a real fix.
 
-Reading the enable-list and coordinate from inside a sandboxed app is the interesting part:
-cfprefsd denies a foreign app the cross-domain read, so GeoShim applies a
+Reading the exclusion list and coordinate from inside a sandboxed app is the interesting
+part: cfprefsd denies a foreign app the cross-domain read, so GeoShim applies a
 [libSandy](https://github.com/roothide/libSandy) profile
 (`layout/Library/libSandy/GeoShim.plist`) in its constructor, granting a sandbox file-read
-extension on the prefs plist and the staged route. The roothide libSandy fork runs
-`jbroot()` on the profile path before issuing the extension, and GeoShim reads those same
-`jbroot()`'d paths (`GSCommon.h`), so the grant and the read line up. The daemon path needs
-none of this — `locationd` reads the plist directly.
+extension on the prefs plist. The roothide libSandy fork runs `jbroot()` on the profile path
+before issuing the extension, and GeoShim reads that same `jbroot()`'d path (`GSCommon.h`),
+so the grant and the read line up. The daemon path needs none of this — `locationd` reads
+the plist directly.
 
 ### Making the fix look real
 
 `GSLocationFactory` populates every field per delivery rather than leaving placeholders:
 
-- coordinate jittered by a Gaussian ±`JitterMetres` (metres → degrees, latitude-corrected,
-  `cos(lat)` clamped near the poles)
+- coordinate jittered by a Gaussian ±`JitterMetres` — the configurable **uncertainty**
+  (metres → degrees, latitude-corrected, `cos(lat)` clamped near the poles)
 - `horizontalAccuracy` a random walk over 5–65 m, `verticalAccuracy` over 3–10 m — a walk,
   not a constant and not uniform noise, because that is how a receiver behaves as its
   solution firms up or degrades
-- `speed` 0 ± small noise when stationary, derived from the polyline when moving;
+- `altitude` a bounded random walk around the configured value (±8 m barometric drift) plus
+  a little per-fix noise — quiet but never frozen
+- `speed` a small non-zero value (a stationary receiver never reads exactly 0);
   `speedAccuracy` a small positive value, never −1
-- `course` −1 when stationary, the segment bearing when moving (blended across vertices,
-  not snapped); `courseAccuracy` positive only when the course is valid
-- `altitude` from config ± 0.5 m; `timestamp` is `[NSDate date]` at delivery
-
-Route mode advances a distance cursor by `speed × elapsed` along the cumulative haversine
-polyline, varies speed ±10%, and eases through sharp turns.
+- `course` −1 and `courseAccuracy` −1 (a static fix has no meaningful heading)
+- `timestamp` is `[NSDate date]` at delivery
 
 ### `sourceInformation`
 
@@ -133,16 +134,14 @@ for the class-identity caveat of strategy 2.
 |---|---|
 | `Tweak.x` | Both paths: the locationd `CLLocation`/`CLVisit` swizzles + status responder, and the app-side `CLLocationManager` fallback hooks |
 | `GSLocationFactory.{h,m}` | Builds the spoofed `CLLocation`; noise, accuracy, `sourceInformation` |
-| `GSRouteEngine.{h,m}` | GPX parsing, haversine cumulative distance, interpolation |
-| `GSConfig.{h,m}` | Preferences snapshot (incl. `AppFallback` / `EnabledBundles`); Darwin-notification live reload |
-| `GSCommon.h` | Identifier, `jbroot()`-based paths, status-ping notify names, logging gate |
+| `GSConfig.{h,m}` | Preferences snapshot (incl. `AppFallback` / `DisabledBundles`); Darwin-notification live reload |
+| `GSCommon.h` | Identifier, `jbroot()`-based path, status-ping notify names + coordinate fingerprint, logging gate |
 | `cli/main.m` | The `geoshim` control tool (writes prefs, pings the daemon) |
 | `cli/entitlements.plist` | roothide `no-sandbox` entitlements for the CLI (see Building) |
-| `prefs/` | Settings bundle — the AltList app picker for the fallback |
+| `prefs/` | Settings bundle — status readout, MapKit picker, and the AltList exclusion picker |
 | `GeoShim.plist` | Injection filter — `locationd` **and** `CLLocationManager`-using apps |
-| `layout/Library/libSandy/GeoShim.plist` | libSandy profile granting the prefs/route file-read extension |
+| `layout/Library/libSandy/GeoShim.plist` | libSandy profile granting the prefs file-read extension |
 | `layout/Library/PreferenceLoader/Preferences/GeoShim.plist` | Settings entry |
-| `examples/tokyo-loop.gpx` | A short loop for smoke-testing route mode |
 
 ---
 
@@ -230,7 +229,6 @@ product. Just make sure Tweak Injection is enabled and you are not in safe mode
 
 ```
 geoshim start -x 35.6812 -y 139.7671 [-a 40.0] [options]
-geoshim route <file.gpx> [--speed 1.4] [--loop|--reverse|--stop]
 geoshim stop
 geoshim fallback <on|off>
 geoshim status
@@ -241,14 +239,15 @@ Options for `start`:
 | Flag | Effect |
 |---|---|
 | `--source-info <nil\|clean\|passthrough>` | how `CLLocation.sourceInformation` reads |
-| `--jitter <metres>` | per-update coordinate noise (default 2 m) |
+| `--jitter <metres>` | per-update coordinate uncertainty (default 2 m) |
 | `--debug-log-real` | log genuine fixes — needs a development (non-`FINALPACKAGE`) build |
 | `--interval <s>`, `--no-synthesize` | synthetic-timer cadence / disable it — used by the app-side fallback |
 
 `geoshim fallback on|off` is the master switch for the app-side hooks (on by default); the
-locationd path is always active. Choose *which* apps the fallback covers in **Settings →
-GeoShim → Apps**. `geoshim status` pings locationd (see below) and prints both the live
-daemon state and the configured prefs, including the master switch and the picked apps.
+locationd path is always active. The fallback is normally on for **every** app; **exclude**
+specific apps in **Settings → GeoShim → Apps**. `geoshim status` pings locationd (see below),
+asserts it is serving the configured coordinate, and prints the configured prefs including
+the master switch and the excluded apps.
 
 ### The Settings panel
 
@@ -257,7 +256,8 @@ entry backed by the `GeoShimPrefs` bundle), so you never need a terminal for day
 use:
 
 - **Status** — a live read-only readout of the current **state** (enabled/disabled),
-  **coordinate**, and **mode**, refreshed each time the page appears.
+  **coordinate**, and a **locationd** line that actually pings the daemon and asserts it is
+  serving the configured coordinate. Refreshed each time the page appears.
 - **Spoofing → Enabled** — the master `Enabled` switch. Flipping it writes the prefs and
   posts the reload notification, so `locationd` applies it live, exactly like
   `geoshim start`/`stop`.
@@ -266,17 +266,16 @@ use:
   `Latitude`/`Longitude` to the domain and posts the reload. It opens centred on the
   current coordinate.
 - **App-side fallback** — the `AppFallback` master switch plus the **Apps** picker
-  (AltList), which is the same `EnabledBundles` list the `geoshim fallback` command and the
-  tweak's self-gate use.
+  (AltList). The fallback is on for every app by default, so the picker is an **exclusion**
+  list: an app switched **off** is written to the `DisabledBundles` array the `geoshim
+  fallback` command and the tweak's self-gate share.
 
 The panel reads and writes the `xyz.regulad.geoshim` domain through `cfprefsd` — the same
 plist the tweak and CLI read — so the two stay in sync.
 
 The tool writes the plist (readable by `mobile`) and posts
 `xyz.regulad.geoshim/prefsChanged`. `locationd` re-reads it live via a Darwin-notification
-observer — no respring. `geoshim route` stages the GPX under
-`jbroot(/var/mobile/Library/GeoShim/)` so it is readable from the daemon. Convert routes to
-GPX with <https://mapstogpx.com/>.
+observer — no respring.
 
 ### Preferences
 
@@ -286,29 +285,26 @@ GPX with <https://mapstogpx.com/>.
 |---|---|---|---|
 | `Enabled` | bool | false | Master switch for spoofing (both paths) |
 | `AppFallback` | bool | true | Master switch for the app-side hooks (`geoshim fallback`) |
-| `EnabledBundles` | array | `[]` | Bundle IDs the app-side fallback covers (set in Settings) |
-| `Latitude` / `Longitude` | real | — | Static coordinate; also the route fallback |
+| `DisabledBundles` | array | `[]` | Bundle IDs **excluded** from the normally-on app-side fallback (set in Settings) |
+| `Latitude` / `Longitude` | real | — | Static coordinate |
 | `Altitude` | real | 0 | Metres. Set it — 0 m in Denver is a tell |
-| `Mode` | string | `static` | `static` or `route` |
 | `SourceInfoMode` | string | `nil` | `nil`, `clean`, `passthrough` |
-| `JitterMetres` | real | 2.0 | Gaussian coordinate noise per update |
-| `RoutePlistPath` | string | "" | Path to a `.gpx` or `.plist` route |
-| `RouteLoop` | bool | true | Loop at the end of the route |
-| `RouteEndBehavior` | string | from `RouteLoop` | `loop`, `reverse`, `stop` |
-| `RouteSpeedMps` | real | 1.4 | Base speed; varied ±10% per tick |
+| `JitterMetres` | real | 2.0 | Gaussian coordinate uncertainty per update |
+| `UpdateIntervalSec` | real | 1.0 | App-side synthetic-timer cadence |
+| `SynthesizeUpdates` | bool | true | App-side synthetic timer on/off |
 | `LogRealFixes` | bool | false | Debug builds only; logs genuine fixes |
 
-`UpdateIntervalSec` / `SynthesizeUpdates` drive the **app-side fallback's** synthetic
-timer; they do nothing on the daemon path, which only rewrites fixes `locationd` already
-emits. Anything unparseable — a missing plist, a bad coordinate, a route under two points —
-resolves to *disabled*, not an error. The tweak fails open by construction.
+`UpdateIntervalSec` / `SynthesizeUpdates` drive the **app-side fallback's** synthetic timer;
+they do nothing on the daemon path, which only rewrites fixes `locationd` already emits.
+Anything unparseable — a missing plist or a bad coordinate — resolves to *disabled*, not an
+error. The tweak fails open by construction.
 
 ---
 
 ## Verification
 
-Use a development build (`make package`, logging on by default) and watch with `oslog | grep geoshim` (locationd is the only
-process that logs `[geoshim]`) or `idevicesyslog | grep geoshim`.
+Use a development build (`make package`, logging on by default) and watch with `oslog | grep GeoShim` (locationd is the only
+process that logs `[GeoShim]`) or `idevicesyslog | grep GeoShim`.
 
 1. **It loads.** `killall -9 locationd`, then expect
    `loaded in locationd (…)`, `CLLocation encodeWithCoder: hook installed`, and
@@ -326,7 +322,9 @@ process that logs `[geoshim]`) or `idevicesyslog | grep geoshim`.
 5. **No regression when disabled.** `geoshim stop`, `killall -9 locationd`; behaviour must
    be identical to the tweak not being installed. The safety net — do not skip it.
 
-`geoshim status` also reports a loaded route's parsed point count and length.
+`geoshim status` also pings locationd and prints `serving configured coordinate: YES` when
+the daemon's live coordinate matches the plist — the assertion that the tweak is not just
+loaded but actually serving the value you set.
 
 ---
 
@@ -391,13 +389,13 @@ step is needed.
 is `mobile`-readable (`geoshim` sets 0644, chowns 501:501 when run as root). If `geoshim`
 itself wrote it to the wrong place, it is missing the `no-sandbox` entitlement.
 
-**App does not move but `locationd: encode …` logs** — locationd isn't delivering that
-app's fixes via `encodeWithCoder:`; class-dump `locationd` for the actual delivery selector
-(around `CLDaemon` / `CLXPCConnection`).
+**App shows the wrong place but `locationd: encode …` logs** — locationd isn't delivering
+that app's fixes via `encodeWithCoder:`; class-dump `locationd` for the actual delivery
+selector (around `CLDaemon` / `CLXPCConnection`).
 
-**Route behaves as static** — the route failed to load and degraded to the static
-coordinate. `geoshim status`; a point count under 2 means no `trkpt`/`rtept`/`wpt` were
-parsed.
+**`geoshim status` says `value differs`** — locationd is live but serving a different
+coordinate than the plist. It hasn't reloaded: re-run `geoshim start …` (which posts the
+reload) or `killall -9 locationd`.
 
 ---
 
@@ -426,8 +424,8 @@ For this deployment (a **Wi-Fi-only iPad**, so anything cellular is not applicab
   at the spoofed location (a VPN **upstream of the device**, e.g. on a router, so the iPad
   shows no `utun` interface for an app to detect).
 - **Cellular — not applicable** on this Wi-Fi-only iPad.
-- **Sensor disagreement.** `CMMotionActivity` reports stationary while a route advances;
-  `CMAltimeter` and `NSTimeZone.localTimeZone` still describe the real environment.
+- **Sensor disagreement.** `CMAltimeter` and `NSTimeZone.localTimeZone` still describe the
+  real environment, contradicting a spoofed coordinate far from the device.
 
 ### Within locationd but not covered
 
@@ -466,7 +464,7 @@ stronger than it is.
 ## Credit
 
 `locsim` (<https://github.com/udevsharold/locsim>, GPLv3) is worth reading for its
-coordinate and GPX plumbing, even though its delivery mechanism — `CLSimulationManager`,
+coordinate plumbing, even though its delivery mechanism — `CLSimulationManager`,
 gated by `com.apple.locationd.simulation` — is precisely the one this project avoids.
 
 ---

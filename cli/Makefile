@@ -4,7 +4,7 @@ ARCHS = arm64
 include $(THEOS)/makefiles/common.mk
 
 TOOL_NAME = geoshim
-geoshim_FILES = main.m ../GSRouteEngine.m ../GSConfig.m
+geoshim_FILES = main.m
 geoshim_CFLAGS = -fobjc-arc -Wall -I..
 geoshim_FRAMEWORKS = Foundation CoreLocation
 geoshim_INSTALL_PATH = /usr/local/bin
@@ -15,7 +15,7 @@ geoshim_INSTALL_PATH = /usr/local/bin
 geoshim_CODESIGN_FLAGS = -Sentitlements.plist
 
 # Same identifier as the dylib. No prefix define: jbroot() resolves the
-# preferences and route paths at runtime, so the CLI and the dylib agree.
+# preferences path at runtime, so the CLI and the dylib agree.
 geoshim_CFLAGS += -DGS_IDENTIFIER='@"xyz.regulad.geoshim"'
 
 ifeq ($(GEOSHIM_DEBUG),1)

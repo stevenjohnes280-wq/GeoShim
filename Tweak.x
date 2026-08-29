@@ -29,7 +29,6 @@
 #import "GSCommon.h"
 #import "GSConfig.h"
 #import "GSLocationFactory.h"
-#import "GSRouteEngine.h"
 
 // From libSandy (com.opa334.libsandy), the roothide fork. Declared inline so no
 // header install is needed; linked via GeoShim_LIBRARIES = sandy. Only the
@@ -197,7 +196,12 @@ static void gs_answerStatusRequest(CFNotificationCenterRef center, void *observe
         if (cfg.enabled)              state |= GS_STATUS_ENABLED;
         if (gEncodeWithCoderOrig)     state |= GS_STATUS_CL_HOOK;
         if (gVisitEncodeOrig)         state |= GS_STATUS_VISIT_HOOK;
-        if (cfg.mode == GSModeRoute)  state |= GS_STATUS_ROUTE_MODE;
+        // Report the coordinate we are actively serving so the CLI/Settings can
+        // assert locationd holds the configured value.
+        if (cfg.enabled && CLLocationCoordinate2DIsValid(cfg.coordinate)) {
+            uint32_t fp = gs_coord_fingerprint(cfg.coordinate.latitude, cfg.coordinate.longitude);
+            state |= ((uint64_t)fp << GS_STATUS_FP_SHIFT);
+        }
         if (gStatusReplyToken != -1) notify_set_state(gStatusReplyToken, state);
     } @catch (NSException *e) {
         GSLog(@"locationd: status request handler threw %@", e);
@@ -535,7 +539,6 @@ static void gs_prefsChanged(CFNotificationCenterRef center, void *observer,
                             CFDictionaryRef userInfo) {
     @try {
         [GSConfig reload];
-        [[GSRouteEngine shared] reset];
         // Harmless in locationd (no managers were ever registered there).
         gs_reconcileManagers();
     } @catch (NSException *e) {
@@ -558,8 +561,8 @@ static void gs_prefsChanged(CFNotificationCenterRef center, void *observer,
             gs_installStatusResponder();
 
             GSConfig *config = [GSConfig current];
-            GSLog(@"loaded in locationd (enabled=%d mode=%ld srcinfo=%ld strategy=%@)",
-                  config.enabled, (long)config.mode, (long)config.sourceInfoMode,
+            GSLog(@"loaded in locationd (enabled=%d srcinfo=%ld strategy=%@)",
+                  config.enabled, (long)config.sourceInfoMode,
                   [[GSLocationFactory shared] sourceInfoStrategyDescription]);
             return;
         }
@@ -580,8 +583,8 @@ static void gs_prefsChanged(CFNotificationCenterRef center, void *observer,
         GSConfig *config = [GSConfig current];
         NSString *bundleID = NSBundle.mainBundle.bundleIdentifier;
         if (![config appFallbackEnabledForBundle:bundleID]) {
-            GSLog(@"app fallback not enabled for %@ (master=%d, %lu app(s) picked)",
-                  bundleID, config.appFallback, (unsigned long)config.enabledBundles.count);
+            GSLog(@"app fallback excluded for %@ (master=%d, %lu app(s) excluded)",
+                  bundleID, config.appFallback, (unsigned long)config.disabledBundles.count);
             return;
         }
 

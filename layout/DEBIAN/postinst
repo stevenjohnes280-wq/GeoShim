@@ -1,10 +1,15 @@
 #!/bin/sh
-# Reload Settings so the PreferenceLoader entry appears without a manual respring.
-# locationd is already restarted by the package's INSTALL_TARGET_PROCESSES, which
-# reloads the daemon hook. The app-side fallback self-gates at each app's next
-# launch, so no respring is needed for it either. We deliberately do NOT killall
-# SpringBoard here - that could take down the package manager doing the install.
+# On install/upgrade, restart the processes GeoShim hooks so changes take effect
+# without a manual respring or reboot:
+#   - locationd: reload the daemon so the CLLocation/CLVisit hooks take. The
+#     Makefile's INSTALL_TARGET_PROCESSES only covers `make install` over SSH,
+#     not an apt/Sileo install on device, so we kill it here too. launchd
+#     relaunches it immediately on demand, so this is safe.
+#   - Preferences: so the PreferenceLoader entry appears.
+# We deliberately do NOT touch SpringBoard - that could take down the package
+# manager doing the install.
 if [ "$1" = "configure" ] || [ "$1" = "install" ] || [ "$1" = "upgrade" ]; then
+    killall -9 locationd >/dev/null 2>&1 || true
     killall Preferences >/dev/null 2>&1 || true
 fi
 

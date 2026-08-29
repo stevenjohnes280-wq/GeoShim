@@ -5,17 +5,12 @@
 @interface GSConfig ()
 @property (nonatomic, readwrite) BOOL enabled;
 @property (nonatomic, readwrite) BOOL appFallback;
-@property (nonatomic, readwrite, copy) NSArray<NSString *> *enabledBundles;
+@property (nonatomic, readwrite, copy) NSArray<NSString *> *disabledBundles;
 @property (nonatomic, readwrite) CLLocationCoordinate2D coordinate;
 @property (nonatomic, readwrite) CLLocationDistance altitude;
-@property (nonatomic, readwrite) GSMode mode;
 @property (nonatomic, readwrite) GSSourceInfoMode sourceInfoMode;
 @property (nonatomic, readwrite) double jitterMetres;
 @property (nonatomic, readwrite) NSTimeInterval updateInterval;
-@property (nonatomic, readwrite, copy) NSString *routePath;
-@property (nonatomic, readwrite) BOOL routeLoop;
-@property (nonatomic, readwrite) GSRouteEnd routeEndBehavior;
-@property (nonatomic, readwrite) double routeSpeedMps;
 @property (nonatomic, readwrite) BOOL synthesizeUpdates;
 @property (nonatomic, readwrite) BOOL logRealFixes;
 @property (nonatomic, readwrite) uint64_t generation;
@@ -51,17 +46,12 @@ static NSString *gs_string(NSDictionary *d, NSString *key, NSString *fallback) {
     // unreadable, so the fallback hooks still install (they stay inert while
     // Enabled is NO). Only an explicit AppFallback=false turns them off.
     c.appFallback = YES;
-    c.enabledBundles = @[];
+    c.disabledBundles = @[];
     c.coordinate = kCLLocationCoordinate2DInvalid;
     c.altitude = 0.0;
-    c.mode = GSModeStatic;
     c.sourceInfoMode = GSSourceInfoModeNil;
     c.jitterMetres = 2.0;
     c.updateInterval = 1.0;
-    c.routePath = @"";
-    c.routeLoop = YES;
-    c.routeEndBehavior = GSRouteEndLoop;
-    c.routeSpeedMps = 1.4;
     c.synthesizeUpdates = YES;
     c.logRealFixes = NO;
     c.generation = gGSGeneration;
@@ -75,15 +65,16 @@ static NSString *gs_string(NSDictionary *d, NSString *key, NSString *fallback) {
     c.enabled = gs_bool(d, @"Enabled", NO);
     c.appFallback = gs_bool(d, @"AppFallback", YES);
 
-    // EnabledBundles: the AltList picker writes an array of bundle-id strings.
-    // Filter to strings so a malformed plist cannot inject non-strings.
-    id bundles = d[@"EnabledBundles"];
+    // DisabledBundles: the AltList picker writes an array of bundle-id strings
+    // (the apps the normally-on fallback is switched OFF for). Filter to strings
+    // so a malformed plist cannot inject non-strings.
+    id bundles = d[@"DisabledBundles"];
     if ([bundles isKindOfClass:[NSArray class]]) {
         NSMutableArray<NSString *> *clean = [NSMutableArray array];
         for (id b in bundles) {
             if ([b isKindOfClass:[NSString class]] && [(NSString *)b length]) [clean addObject:b];
         }
-        c.enabledBundles = clean;
+        c.disabledBundles = clean;
     }
 
     double lat = gs_number(d, @"Latitude", 0.0);
@@ -96,9 +87,6 @@ static NSString *gs_string(NSDictionary *d, NSString *key, NSString *fallback) {
     c.coordinate = coord;
     c.altitude = gs_number(d, @"Altitude", 0.0);
 
-    NSString *mode = gs_string(d, @"Mode", @"static");
-    c.mode = [mode isEqualToString:@"route"] ? GSModeRoute : GSModeStatic;
-
     NSString *sim = gs_string(d, @"SourceInfoMode", @"nil");
     if ([sim isEqualToString:@"clean"]) {
         c.sourceInfoMode = GSSourceInfoModeClean;
@@ -110,29 +98,8 @@ static NSString *gs_string(NSDictionary *d, NSString *key, NSString *fallback) {
 
     c.jitterMetres = fmax(0.0, fmin(50.0, gs_number(d, @"JitterMetres", 2.0)));
     c.updateInterval = fmax(0.1, fmin(60.0, gs_number(d, @"UpdateIntervalSec", 1.0)));
-    c.routePath = gs_string(d, @"RoutePlistPath", @"");
-    c.routeLoop = gs_bool(d, @"RouteLoop", YES);
-
-    // RouteEndBehavior is optional; without it RouteLoop picks loop-or-stop.
-    NSString *end = gs_string(d, @"RouteEndBehavior", nil);
-    if ([end isEqualToString:@"reverse"]) {
-        c.routeEndBehavior = GSRouteEndReverse;
-    } else if ([end isEqualToString:@"stop"]) {
-        c.routeEndBehavior = GSRouteEndStop;
-    } else if ([end isEqualToString:@"loop"]) {
-        c.routeEndBehavior = GSRouteEndLoop;
-    } else {
-        c.routeEndBehavior = c.routeLoop ? GSRouteEndLoop : GSRouteEndStop;
-    }
-    c.routeSpeedMps = fmax(0.0, fmin(150.0, gs_number(d, @"RouteSpeedMps", 1.4)));
     c.synthesizeUpdates = gs_bool(d, @"SynthesizeUpdates", YES);
     c.logRealFixes = gs_bool(d, @"LogRealFixes", NO);
-
-    // Route mode with no usable path degrades to static rather than to nothing.
-    if (c.mode == GSModeRoute && c.routePath.length == 0) {
-        GSLog(@"config: route mode requested with no RoutePlistPath; using static");
-        c.mode = GSModeStatic;
-    }
 
     c.generation = gGSGeneration;
     return c;
@@ -141,7 +108,8 @@ static NSString *gs_string(NSDictionary *d, NSString *key, NSString *fallback) {
 - (BOOL)appFallbackEnabledForBundle:(NSString *)bundleIdentifier {
     if (!self.appFallback) return NO;
     if (bundleIdentifier.length == 0) return NO;
-    return [self.enabledBundles containsObject:bundleIdentifier];
+    // Normally-on: covered unless explicitly excluded.
+    return ![self.disabledBundles containsObject:bundleIdentifier];
 }
 
 + (instancetype)loadFromDisk {
@@ -182,8 +150,8 @@ static NSString *gs_string(NSDictionary *d, NSString *key, NSString *fallback) {
     os_unfair_lock_lock(&gGSConfigLock);
     gGSCurrent = loaded;
     os_unfair_lock_unlock(&gGSConfigLock);
-    GSLog(@"config: reloaded gen=%llu enabled=%d mode=%ld coord=%f,%f srcinfo=%ld",
-          loaded.generation, loaded.enabled, (long)loaded.mode,
+    GSLog(@"config: reloaded gen=%llu enabled=%d coord=%f,%f srcinfo=%ld",
+          loaded.generation, loaded.enabled,
           loaded.coordinate.latitude, loaded.coordinate.longitude,
           (long)loaded.sourceInfoMode);
 }

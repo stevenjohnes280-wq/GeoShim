@@ -8,20 +8,7 @@ repository:
     CLLocation/CLVisit on the daemon's XPC serialization path and defeats
     sourceInformation.isSimulatedBySoftware.
   homepage: ""
-  topics:
-    - ios
-    - jailbreak
-    - tweak
-    - roothide
-    - dopamine
-    - location-spoofing
-    - gps-spoofing
-    - corelocation
-    - locationd
-    - theos
-    - ellekit
-    - arm64e
-    - ios15
+  topics: "ios, jailbreak, tweak, roothide, dopamine, location-spoofing, gps-spoofing, corelocation, locationd, theos, ellekit, arm64e, ios15"
   has_issues: true
   has_projects: false
   has_wiki: false
