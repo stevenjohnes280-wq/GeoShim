@@ -10,16 +10,6 @@
 #import <notify.h>
 #import <sys/stat.h>
 #import <unistd.h>
-#import <signal.h>
-#import <string.h>
-#import <stdlib.h>
-#import <errno.h>
-
-// libproc is not in the theos iOS SDK headers; declare what we use. These
-// symbols live in libSystem, which is always linked.
-extern int proc_listpids(uint32_t type, uint32_t typeinfo, void *buffer, int buffersize);
-extern int proc_name(int pid, void *buffer, uint32_t buffersize);
-#define PROC_ALL_PIDS 1
 
 #import "GSCommon.h"
 
@@ -93,38 +83,6 @@ static BOOL writePrefs(NSDictionary *prefs) {
     return YES;
 }
 
-// Restart locationd so every client re-registers and re-grabs the new position.
-// Live re-delivery is not enough for clients that cache a fix; a SIGKILL (launchd
-// relaunches locationd at once) forces a clean re-grab - the same effect as
-// `killall -9 locationd`. Requires permission to signal locationd (run as root);
-// a permission failure is reported, not fatal.
-static void killLocationd(void) {
-    int cap = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
-    if (cap <= 0) return;
-    pid_t *pids = (pid_t *)malloc(cap);
-    if (!pids) return;
-    int n = proc_listpids(PROC_ALL_PIDS, 0, pids, cap);
-    int count = n / (int)sizeof(pid_t);
-    BOOL killed = NO, denied = NO;
-    for (int i = 0; i < count; i++) {
-        pid_t p = pids[i];
-        if (p <= 0) continue;
-        char name[256] = {0};
-        if (proc_name(p, name, sizeof(name)) > 0 && strcmp(name, "locationd") == 0) {
-            if (kill(p, SIGKILL) == 0) killed = YES;
-            else if (errno == EPERM) denied = YES;
-        }
-    }
-    free(pids);
-    if (killed) {
-        printf("geoshim: restarted locationd\n");
-    } else if (denied) {
-        fprintf(stderr, "geoshim: could not restart locationd (permission denied - run geoshim as root)\n");
-    } else {
-        fprintf(stderr, "geoshim: locationd not found to restart\n");
-    }
-}
-
 static BOOL parseSourceInfo(NSString *value, NSString **out) {
     if ([value isEqualToString:@"nil"] ||
         [value isEqualToString:@"clean"] ||
@@ -187,7 +145,6 @@ static int commandStart(NSArray<NSString *> *args) {
     if (!writePrefs(prefs)) return 1;
     printf("geoshim: static at %.6f, %.6f (alt %.1f m)\n",
            coord.latitude, coord.longitude, [prefs[@"Altitude"] doubleValue]);
-    killLocationd();
     return 0;
 }
 
@@ -196,7 +153,6 @@ static int commandStop(void) {
     prefs[@"Enabled"] = @NO;
     if (!writePrefs(prefs)) return 1;
     printf("geoshim: disabled; clients see real locations again\n");
-    killLocationd();
     return 0;
 }
 

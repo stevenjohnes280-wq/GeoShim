@@ -275,11 +275,11 @@ plist the tweak and CLI read — so the two stay in sync.
 
 The tool writes the plist (readable by `mobile`) and posts
 `xyz.regulad.geoshim/prefsChanged`. `locationd` re-reads it live via a Darwin-notification
-observer — no respring. On top of that, `geoshim start` and `geoshim stop` **restart
-locationd** (a SIGKILL; launchd relaunches it) so clients that cache a fix re-grab the new
-position — run `geoshim` as root for this, the same privilege `killall -9 locationd` needs.
-The sandboxed Settings app can't restart locationd, so a Settings-only change reloads the
-daemon live but won't force cached clients to re-grab.
+observer — no respring. On a real coordinate or enabled/disabled change, the tweak inside
+locationd then **SIGKILLs the daemon itself**; launchd relaunches it and every client
+re-registers and re-grabs the new position — the reliable way to make a change take hold for
+clients that cache a fix. This covers changes from the CLI **and** from the Settings app,
+with no manual `killall`.
 
 ### Preferences
 
@@ -398,9 +398,9 @@ that app's fixes via `encodeWithCoder:`; class-dump `locationd` for the actual d
 selector (around `CLDaemon` / `CLXPCConnection`).
 
 **`geoshim status` says `value differs`** — locationd is live but serving a different
-coordinate than the plist (e.g. a Settings-app change reloaded the daemon's config but
-couldn't restart it). `geoshim start …` / `geoshim stop` restart locationd automatically
-when run as root; otherwise `killall -9 locationd`.
+coordinate than the plist. Normally the daemon SIGKILLs and relaunches itself on a change;
+if this persists, force it with `killall -9 locationd`. (locationd's own `os_log` output —
+including the self-kill line — is only visible as **root**.)
 
 ---
 

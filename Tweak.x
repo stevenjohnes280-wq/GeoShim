@@ -25,6 +25,8 @@
 #import <os/lock.h>
 #import <stdlib.h>
 #import <string.h>
+#import <signal.h>
+#import <unistd.h>
 
 #import "GSCommon.h"
 #import "GSConfig.h"
@@ -534,6 +536,37 @@ static void gs_reconcileManagers(void) {
 
 #pragma mark - Preferences reload
 
+// Snapshot of the last coordinate/enabled the daemon acted on, so we only bounce
+// locationd when the position or on/off state actually changes.
+static int gDaemonPrevEnabled = -1;
+static double gDaemonPrevLat = 1e9, gDaemonPrevLon = 1e9;
+
+// Live re-delivery through encodeWithCoder: reaches third-party clients, but some
+// first-party consumers (Apple Maps) cache a fix from a path that does not
+// re-serialize and so keep showing the old location. Bouncing locationd forces
+// every client to re-register and re-grab, which is the only reliable way to make
+// a coordinate change take hold everywhere. Guarded to real changes so ordinary
+// prefs edits do not thrash the daemon. SIGKILL matches `killall -9 locationd`;
+// launchd relaunches immediately and the fresh instance reads the new prefs.
+static void gs_restartLocationdIfCoordinateChanged(void) {
+    GSConfig *c = [GSConfig current];
+    BOOL changed = (gDaemonPrevEnabled != (int)c.enabled) ||
+                   (c.enabled && CLLocationCoordinate2DIsValid(c.coordinate) &&
+                    (gDaemonPrevLat != c.coordinate.latitude ||
+                     gDaemonPrevLon != c.coordinate.longitude));
+    gDaemonPrevEnabled = (int)c.enabled;
+    gDaemonPrevLat = c.coordinate.latitude;
+    gDaemonPrevLon = c.coordinate.longitude;
+    if (!changed) return;
+
+    // Synchronous SIGKILL: no dispatch dependency at all. launchd relaunches a
+    // fresh locationd that reads the new prefs, so every client re-registers and
+    // re-grabs. This is the reliable way to make a change take hold everywhere;
+    // guarded above to real coordinate/enabled changes so we do not thrash.
+    GSLog(@"locationd: config changed - SIGKILL self now (launchd relaunches with the new fix)");
+    kill(getpid(), SIGKILL);
+}
+
 static void gs_prefsChanged(CFNotificationCenterRef center, void *observer,
                             CFStringRef name, const void *object,
                             CFDictionaryRef userInfo) {
@@ -541,6 +574,7 @@ static void gs_prefsChanged(CFNotificationCenterRef center, void *observer,
         [GSConfig reload];
         // Harmless in locationd (no managers were ever registered there).
         gs_reconcileManagers();
+        if (gs_isLocationd()) gs_restartLocationdIfCoordinateChanged();
     } @catch (NSException *e) {
         GSLog(@"prefs: reload threw %@", e);
     }
@@ -569,6 +603,12 @@ static void gs_prefsChanged(CFNotificationCenterRef center, void *observer,
             gs_installStatusResponder();
 
             GSConfig *config = [GSConfig current];
+            // Seed the change snapshot with what we loaded, so the first prefs
+            // edit is compared against reality rather than triggering a spurious
+            // bounce right after launch.
+            gDaemonPrevEnabled = (int)config.enabled;
+            gDaemonPrevLat = config.coordinate.latitude;
+            gDaemonPrevLon = config.coordinate.longitude;
             GSLog(@"loaded in locationd (enabled=%d srcinfo=%ld strategy=%@)",
                   config.enabled, (long)config.sourceInfoMode,
                   [[GSLocationFactory shared] sourceInfoStrategyDescription]);
