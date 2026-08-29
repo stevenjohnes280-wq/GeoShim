@@ -247,6 +247,28 @@ locationd path is always active. Choose *which* apps the fallback covers in **Se
 GeoShim → Apps**. `geoshim status` pings locationd (see below) and prints both the live
 daemon state and the configured prefs, including the master switch and the picked apps.
 
+### The Settings panel
+
+Everything the CLI does is also on the **Settings → GeoShim** page (a PreferenceLoader
+entry backed by the `GeoShimPrefs` bundle), so you never need a terminal for day-to-day
+use:
+
+- **Status** — a live read-only readout of the current **state** (enabled/disabled),
+  **coordinate**, and **mode**, refreshed each time the page appears.
+- **Spoofing → Enabled** — the master `Enabled` switch. Flipping it writes the prefs and
+  posts the reload notification, so `locationd` applies it live, exactly like
+  `geoshim start`/`stop`.
+- **Set location on map…** — a full-screen **MapKit** picker. Pan the map under the
+  crosshair (the live coordinate shows at the bottom) and tap **Save**; it writes
+  `Latitude`/`Longitude` to the domain and posts the reload. It opens centred on the
+  current coordinate.
+- **App-side fallback** — the `AppFallback` master switch plus the **Apps** picker
+  (AltList), which is the same `EnabledBundles` list the `geoshim fallback` command and the
+  tweak's self-gate use.
+
+The panel reads and writes the `xyz.regulad.geoshim` domain through `cfprefsd` — the same
+plist the tweak and CLI read — so the two stay in sync.
+
 The tool writes the plist (readable by `mobile`) and posts
 `xyz.regulad.geoshim/prefsChanged`. `locationd` re-reads it live via a Darwin-notification
 observer — no respring. `geoshim route` stages the GPX under
@@ -443,3 +465,11 @@ stronger than it is.
 `locsim` (<https://github.com/udevsharold/locsim>, GPLv3) is worth reading for its
 coordinate and GPX plumbing, even though its delivery mechanism — `CLSimulationManager`,
 gated by `com.apple.locationd.simulation` — is precisely the one this project avoids.
+
+---
+
+## License
+
+[AGPLv3](LICENSE). The bundled [AltList](https://github.com/opa334/AltList) and
+[libSandy](https://github.com/roothide/libSandy) are separate works under their own
+licenses.
