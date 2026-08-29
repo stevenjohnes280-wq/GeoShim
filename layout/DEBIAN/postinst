@@ -1,14 +1,17 @@
 #!/bin/sh
-# On install/upgrade, restart the processes GeoShim hooks so changes take effect
+# On install/upgrade, restart the processes GeoShim touches so changes take effect
 # without a manual respring or reboot:
+#   - sandyd: re-read the libSandy profiles we just installed (it caches them at
+#     launch), so the app-side prefs read and the Settings exec grant are live now.
 #   - locationd: reload the daemon so the CLLocation/CLVisit hooks take. The
-#     Makefile's INSTALL_TARGET_PROCESSES only covers `make install` over SSH,
-#     not an apt/Sileo install on device, so we kill it here too. launchd
-#     relaunches it immediately on demand, so this is safe.
+#     Makefile's INSTALL_TARGET_PROCESSES only covers `make install` over SSH, not
+#     an apt/Sileo install on device, so we kill it here too. launchd relaunches it
+#     immediately on demand, so this is safe.
 #   - Preferences: so the PreferenceLoader entry appears.
 # We deliberately do NOT touch SpringBoard - that could take down the package
 # manager doing the install.
 if [ "$1" = "configure" ] || [ "$1" = "install" ] || [ "$1" = "upgrade" ]; then
+    launchctl kickstart -k system/com.opa334.sandyd >/dev/null 2>&1 || true
     killall -9 locationd >/dev/null 2>&1 || true
     killall Preferences >/dev/null 2>&1 || true
 fi
