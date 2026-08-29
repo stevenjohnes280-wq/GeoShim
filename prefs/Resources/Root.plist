@@ -8,19 +8,23 @@
 	<key>items</key>
 	<array>
 
-		<!-- Live status, refreshed each time the page appears. Read-only; the
-		     values come from the get: selectors on the list controller. The
-		     "locationd" row pings the daemon and asserts it is serving the
-		     configured coordinate. -->
+		<!-- Live status. The rows refresh on appear, on the prefsChanged
+		     notification, and on a 2 s poll (see GeoShimRootListController), so
+		     the locationd line tracks spoofing changes instead of getting stuck.
+		     The footer is the disclaimer: this only covers the public API. -->
 		<dict>
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
 			<string>Status</string>
+			<key>footerText</key>
+			<string>This value is only served via the public CoreLocation API. Apps that read location through a private, first-party path (for example Apple Maps) are not affected.</string>
 		</dict>
 		<dict>
 			<key>cell</key>
 			<string>PSTitleValueCell</string>
+			<key>id</key>
+			<string>statusState</string>
 			<key>label</key>
 			<string>State</string>
 			<key>get</key>
@@ -31,6 +35,8 @@
 		<dict>
 			<key>cell</key>
 			<string>PSTitleValueCell</string>
+			<key>id</key>
+			<string>statusCoordinate</string>
 			<key>label</key>
 			<string>Coordinate</string>
 			<key>get</key>
@@ -41,6 +47,8 @@
 		<dict>
 			<key>cell</key>
 			<string>PSTitleValueCell</string>
+			<key>id</key>
+			<string>statusLocationd</string>
 			<key>label</key>
 			<string>locationd</string>
 			<key>get</key>
