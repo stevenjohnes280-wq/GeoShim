@@ -6,6 +6,9 @@ GeoShimPrefs_INSTALL_PATH = /Library/PreferenceBundles
 GeoShimPrefs_CFLAGS = -fobjc-arc -I..
 GeoShimPrefs_FRAMEWORKS = UIKit MapKit CoreLocation
 GeoShimPrefs_PRIVATE_FRAMEWORKS = Preferences
+# libSandy: lift Preferences' sandbox so the Enabled switch can exec the geoshim
+# CLI (the GeoShimSettings profile grants process-exec on the binary).
+GeoShimPrefs_LIBRARIES = sandy
 # AltList provides the app picker (ATLApplicationListMultiSelectionController).
 # roothide bundles it in theos; if linking fails, run AltList's
 # install_to_theos.sh once. Runtime dependency declared in ../control.

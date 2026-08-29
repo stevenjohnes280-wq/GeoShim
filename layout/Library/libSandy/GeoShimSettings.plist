@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  libSandy profile for the Settings bundle. Applied via
+  libSandy_applyProfile("GeoShimSettings") from GeoShimRootListController when the
+  page appears, so Preferences.app can execute the geoshim CLI - letting the
+  Enabled switch drive the real `geoshim start`/`stop` (which writes the prefs and
+  posts the reload; the daemon then bounces itself). geoshim runs as mobile with
+  its own no-sandbox entitlements, so no setuid is needed.
+
+  com.apple.app-sandbox.executable grants process-exec on the file. roothide's
+  libSandy fork jbroot()s the path before issuing it (sandyd/main.m), and the
+  controller execs jbroot("/usr/local/bin/geoshim"), so grant and exec line up.
+-->
+<plist version="1.0">
+<dict>
+  <key>AllowedProcesses</key>
+  <array>
+    <string>Preferences</string>
+    <string>*</string>
+  </array>
+  <key>Extensions</key>
+  <array>
+    <dict>
+      <key>type</key>
+      <string>file</string>
+      <key>extension_class</key>
+      <string>com.apple.app-sandbox.executable</string>
+      <key>path</key>
+      <string>/usr/local/bin/geoshim</string>
+    </dict>
+    <dict>
+      <key>type</key>
+      <string>file</string>
+      <key>extension_class</key>
+      <string>com.apple.app-sandbox.read</string>
+      <key>path</key>
+      <string>/usr/local/bin/geoshim</string>
+    </dict>
+  </array>
+</dict>
+</plist>

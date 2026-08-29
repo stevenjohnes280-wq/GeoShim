@@ -14,6 +14,15 @@
 #import "GeoShimMapController.h"
 #import "GSCommon.h"
 #import <notify.h>
+#import <spawn.h>
+#import <unistd.h>
+#import <sys/wait.h>
+
+// libSandy (com.opa334.libsandy). Declared inline; linked via
+// GeoShimPrefs_LIBRARIES = sandy. Applied to lift Preferences' sandbox so we can
+// exec the geoshim CLI.
+extern int libSandy_applyProfile(const char *profileName);
+extern char **environ;
 
 static NSString *const kGSDomain = @"xyz.regulad.geoshim";
 
@@ -22,6 +31,7 @@ static NSString *const kGSDomain = @"xyz.regulad.geoshim";
     NSString *_spoofState;
     NSTimer *_pollTimer;
     BOOL _observing;
+    BOOL _sandyApplied;
 }
 
 - (NSArray *)specifiers {
@@ -40,6 +50,11 @@ static void gs_settingsPrefsChanged(CFNotificationCenterRef center, void *observ
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    if (!_sandyApplied) {
+        // Lift Preferences' sandbox so the Enabled switch can exec geoshim.
+        libSandy_applyProfile("GeoShimSettings");
+        _sandyApplied = YES;
+    }
     if (!_observing) {
         CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
                                         (__bridge const void *)self,
@@ -184,6 +199,49 @@ static void gs_settingsPrefsChanged(CFNotificationCenterRef center, void *observ
     return @([[self gs_read:@"Enabled"] boolValue]);
 }
 
+// Run `geoshim <command>` and pipe its stdout/stderr into the log. geoshim writes
+// the prefs and posts the reload (the daemon then SIGKILLs itself), so the switch
+// drives the exact same path as the CLI. Runs as mobile with geoshim's own
+// no-sandbox entitlements - no setuid needed. Returns YES if the process was
+// spawned (the exec grant worked), NO if the sandbox denied it.
+- (BOOL)runGeoshim:(NSString *)command {
+    NSString *binPath = jbroot(@"/usr/local/bin/geoshim");
+    const char *bin = binPath.fileSystemRepresentation;
+    char *argv[] = { (char *)bin, (char *)command.UTF8String, NULL };
+
+    int outPipe[2];
+    if (pipe(outPipe) != 0) return NO;
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, outPipe[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, outPipe[1], STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&actions, outPipe[0]);
+
+    pid_t pid = 0;
+    int rc = posix_spawn(&pid, bin, &actions, NULL, argv, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    close(outPipe[1]);
+    if (rc != 0) {
+        close(outPipe[0]);
+        NSLog(@"[GeoShim] settings: could not exec geoshim (rc=%d) - sandbox denied?", rc);
+        return NO;
+    }
+
+    NSMutableData *out = [NSMutableData data];
+    char buf[512];
+    ssize_t n;
+    while ((n = read(outPipe[0], buf, sizeof(buf))) > 0) [out appendBytes:buf length:(NSUInteger)n];
+    close(outPipe[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+
+    NSString *text = [[NSString alloc] initWithData:out encoding:NSUTF8StringEncoding];
+    NSLog(@"[GeoShim] settings: geoshim %@ (exit %d) -> %@", command, WEXITSTATUS(status),
+          text.length ? [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] : @"(no output)");
+    return YES;
+}
+
 // A plain PSSwitchCell only writes the pref through cfprefsd, whose flush to disk
 // can land after the PostNotification - so the daemon reloads the OLD value and
 // never bounces, and the switch "does nothing". Instead we synchronize the value
@@ -192,11 +250,18 @@ static void gs_settingsPrefsChanged(CFNotificationCenterRef center, void *observ
 // change). This mirrors what the map picker and the `geoshim` CLI already do.
 - (void)setEnabled:(id)value specifier:(PSSpecifier *)specifier {
     BOOL on = [value boolValue];
-    CFPreferencesSetAppValue(CFSTR("Enabled"),
-                             on ? kCFBooleanTrue : kCFBooleanFalse,
-                             (__bridge CFStringRef)kGSDomain);
-    CFPreferencesAppSynchronize((__bridge CFStringRef)kGSDomain);
-    notify_post(GS_NOTIFY_NAME);
+
+    // Preferred path: drive the real CLI (`geoshim start` resumes the saved
+    // coordinate; `geoshim stop` disables). If the sandbox denies the exec, fall
+    // back to writing the pref ourselves - synchronize to disk first, then post,
+    // so the daemon still reads the new value and self-restarts.
+    if (![self runGeoshim:(on ? @"start" : @"stop")]) {
+        CFPreferencesSetAppValue(CFSTR("Enabled"),
+                                 on ? kCFBooleanTrue : kCFBooleanFalse,
+                                 (__bridge CFStringRef)kGSDomain);
+        CFPreferencesAppSynchronize((__bridge CFStringRef)kGSDomain);
+        notify_post(GS_NOTIFY_NAME);
+    }
     [self refreshStatus];
 }
 
