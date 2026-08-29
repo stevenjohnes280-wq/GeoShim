@@ -23,8 +23,9 @@ GeoShim_LIBRARIES = sandy
 # libroothide dependency.
 GeoShim_CFLAGS += -DGS_IDENTIFIER='@"xyz.regulad.geoshim"'
 
-# Debug logging is off unless you ask for it: make GEOSHIM_DEBUG=1
-ifeq ($(GEOSHIM_DEBUG),1)
+# Debug logging is on for development builds and stripped only from a release
+# build (make package FINALPACKAGE=1), matching the theos ecosystem convention.
+ifneq ($(FINALPACKAGE),1)
 GeoShim_CFLAGS += -DGEOSHIM_DEBUG=1
 endif
 

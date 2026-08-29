@@ -175,9 +175,12 @@ Then:
 export THEOS=$HOME/theos
 export PATH=/usr/local/bin:$PATH
 
-make package GEOSHIM_DEBUG=1    # 1 Hz logging in locationd — use for bring-up
-make package FINALPACKAGE=1     # silent release — ship this
+make package                # development build: 1 Hz logging in locationd
+make package FINALPACKAGE=1  # release: logging stripped — ship this
 ```
+
+Debug logging is compiled in for a normal build and stripped only when
+`FINALPACKAGE=1`, matching the Theos convention.
 
 `THEOS_PACKAGE_SCHEME = roothide` (in the Makefile) produces an `iphoneos-arm64e` deb with
 files staged at jbroot-relative paths (no `/var/jb`), linked against `libroothide.dylib`
@@ -239,7 +242,7 @@ Options for `start`:
 |---|---|
 | `--source-info <nil\|clean\|passthrough>` | how `CLLocation.sourceInformation` reads |
 | `--jitter <metres>` | per-update coordinate noise (default 2 m) |
-| `--debug-log-real` | log genuine fixes — needs a `GEOSHIM_DEBUG=1` build |
+| `--debug-log-real` | log genuine fixes — needs a development (non-`FINALPACKAGE`) build |
 | `--interval <s>`, `--no-synthesize` | synthetic-timer cadence / disable it — used by the app-side fallback |
 
 `geoshim fallback on|off` is the master switch for the app-side hooks (on by default); the
@@ -304,7 +307,7 @@ resolves to *disabled*, not an error. The tweak fails open by construction.
 
 ## Verification
 
-Use a `GEOSHIM_DEBUG=1` build and watch with `oslog | grep geoshim` (locationd is the only
+Use a development build (`make package`, logging on by default) and watch with `oslog | grep geoshim` (locationd is the only
 process that logs `[geoshim]`) or `idevicesyslog | grep geoshim`.
 
 1. **It loads.** `killall -9 locationd`, then expect
