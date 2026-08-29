@@ -78,14 +78,10 @@
 			<string>enabledSwitch</string>
 			<key>label</key>
 			<string>Enabled</string>
-			<key>defaults</key>
-			<string>xyz.regulad.geoshim</string>
-			<key>key</key>
-			<string>Enabled</string>
-			<key>default</key>
-			<false/>
-			<key>PostNotification</key>
-			<string>xyz.regulad.geoshim/prefsChanged</string>
+			<key>get</key>
+			<string>getEnabled:</string>
+			<key>set</key>
+			<string>setEnabled:specifier:</string>
 		</dict>
 		<dict>
 			<key>cell</key>

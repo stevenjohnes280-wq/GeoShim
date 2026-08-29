@@ -178,6 +178,28 @@ static void gs_settingsPrefsChanged(CFNotificationCenterRef center, void *observ
     return [NSString stringWithFormat:@"%.5f, %.5f", [la doubleValue], [lo doubleValue]];
 }
 
+#pragma mark - Enabled switch (real toggle, not just a plist write)
+
+- (id)getEnabled:(PSSpecifier *)specifier {
+    return @([[self gs_read:@"Enabled"] boolValue]);
+}
+
+// A plain PSSwitchCell only writes the pref through cfprefsd, whose flush to disk
+// can land after the PostNotification - so the daemon reloads the OLD value and
+// never bounces, and the switch "does nothing". Instead we synchronize the value
+// to disk first, then post prefsChanged: the daemon reads the new value, applies
+// it, and SIGKILLs itself to re-grab (its self-restart fires on the enabled
+// change). This mirrors what the map picker and the `geoshim` CLI already do.
+- (void)setEnabled:(id)value specifier:(PSSpecifier *)specifier {
+    BOOL on = [value boolValue];
+    CFPreferencesSetAppValue(CFSTR("Enabled"),
+                             on ? kCFBooleanTrue : kCFBooleanFalse,
+                             (__bridge CFStringRef)kGSDomain);
+    CFPreferencesAppSynchronize((__bridge CFStringRef)kGSDomain);
+    notify_post(GS_NOTIFY_NAME);
+    [self refreshStatus];
+}
+
 #pragma mark - Map picker (Root.plist `action`)
 
 - (void)openMap {
