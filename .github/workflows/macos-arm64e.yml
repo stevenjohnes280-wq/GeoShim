@@ -1,0 +1,73 @@
+name: Build GeoShim for iPhone 11 (arm64e)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      THEOS: ${{ runner.temp }}/theos
+
+    steps:
+      - name: Check out GeoShim
+        uses: actions/checkout@v4
+
+      - name: Install RootHide Theos and iOS 16.5 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          brew install ldid xz
+          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/roothide/theos.git "$THEOS"
+          mkdir -p "$THEOS/sdks"
+          curl -fL --retry 3 -o "$RUNNER_TEMP/iPhoneOS16.5.sdk.tar.xz" \
+            https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz
+          tar -xJf "$RUNNER_TEMP/iPhoneOS16.5.sdk.tar.xz" -C "$THEOS/sdks"
+
+      - name: Build RootHide libSandy link library
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/roothide/libSandy.git "$RUNNER_TEMP/libSandy"
+          # The patched 16.5 SDK omits XPC headers used by libSandy.
+          git clone --depth 1 https://github.com/opa334/libSandy.git "$RUNNER_TEMP/libSandy-headers"
+          git -C "$RUNNER_TEMP/libSandy-headers" fetch --depth 1 origin pull/6/head
+          git -C "$RUNNER_TEMP/libSandy-headers" checkout --detach FETCH_HEAD
+          cp -R "$RUNNER_TEMP/libSandy-headers/headers" "$RUNNER_TEMP/libSandy/headers"
+          make -C "$RUNNER_TEMP/libSandy" FINALPACKAGE=1 \
+            THEOS_PACKAGE_SCHEME=roothide ONLY_LIBRARY=1 ARCHS="arm64 arm64e"
+          mkdir -p "$THEOS/lib/iphone/roothide"
+          cp "$RUNNER_TEMP/libSandy/.theos/obj/libsandy.dylib" "$THEOS/lib/iphone/roothide/"
+          cp "$RUNNER_TEMP/libSandy/libSandy.h" "$THEOS/include/"
+
+      - name: Build RootHide AltList link framework
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/roothide/AltList.git "$RUNNER_TEMP/AltList"
+          make -C "$RUNNER_TEMP/AltList" FINALPACKAGE=1 \
+            THEOS_PACKAGE_SCHEME=roothide ARCHS="arm64 arm64e"
+          cp -R "$RUNNER_TEMP/AltList/.theos/obj/AltList.framework" "$THEOS/lib/iphone/roothide/"
+
+      - name: Build GeoShim with Xcode's native arm64e ABI
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Only change the tweak architecture for this CI build.
+          # The CLI remains arm64; the preferences bundle can be universal.
+          sed -i '' 's/^ARCHS = arm64$/ARCHS = arm64e/' Makefile
+          make clean
+          make package
+          xcrun lipo -info .theos/_/Library/MobileSubstrate/DynamicLibraries/GeoShim.dylib
+
+      - name: Save installable deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: GeoShim-native-arm64e
+          path: packages/*.deb
+          if-no-files-found: error
