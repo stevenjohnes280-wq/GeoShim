@@ -64,8 +64,9 @@ jobs:
           # Only change the tweak architecture for this CI build.
           # The CLI remains arm64; the preferences bundle can be universal.
           sed -i '' 's/^ARCHS = arm64$/ARCHS = arm64e/' Makefile
-          make clean
-          make package
+          # Pin the patched SDK: Apple's latest SDK lacks private Preferences.framework.
+          make clean TARGET=iphone:clang:16.5:15.0
+          make package TARGET=iphone:clang:16.5:15.0
           xcrun lipo -info .theos/_/Library/MobileSubstrate/DynamicLibraries/GeoShim.dylib
 
       - name: Save installable deb
