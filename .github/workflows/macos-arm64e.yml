@@ -10,10 +10,11 @@ jobs:
   build:
     runs-on: macos-15
     timeout-minutes: 60
-    env:
-      THEOS: ${{ runner.temp }}/theos
-
     steps:
+      - name: Configure Theos workspace
+        shell: bash
+        run: echo "THEOS=$RUNNER_TEMP/theos" >> "$GITHUB_ENV"
+
       - name: Check out GeoShim
         uses: actions/checkout@v4
 
