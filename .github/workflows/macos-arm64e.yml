@@ -40,7 +40,8 @@ jobs:
           git -C "$RUNNER_TEMP/libSandy-headers" fetch --depth 1 origin pull/6/head
           git -C "$RUNNER_TEMP/libSandy-headers" checkout --detach FETCH_HEAD
           mkdir -p "$RUNNER_TEMP/libSandy/headers"
-          cp -R "$RUNNER_TEMP/libSandy-headers/headers/." "$RUNNER_TEMP/libSandy/headers/"
+          # Only XPC headers are missing; preserve RootHide sandyd.h message IDs.
+          cp -R "$RUNNER_TEMP/libSandy-headers/headers/xpc" "$RUNNER_TEMP/libSandy/headers/"
           make -C "$RUNNER_TEMP/libSandy" FINALPACKAGE=1 \
             THEOS_PACKAGE_SCHEME=roothide ONLY_LIBRARY=1 ARCHS="arm64 arm64e"
           mkdir -p "$THEOS/lib/iphone/roothide"
