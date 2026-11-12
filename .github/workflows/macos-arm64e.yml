@@ -1,4 +1,4 @@
-name: Build GeoShim for iPhone 11 (arm64e)
+name: Build GeoShim for iPhone X (arm64 RootHide)
 
 on:
   workflow_dispatch:
@@ -35,15 +35,13 @@ jobs:
         run: |
           set -euo pipefail
           git clone --depth 1 https://github.com/roothide/libSandy.git "$RUNNER_TEMP/libSandy"
-          # The patched 16.5 SDK omits XPC headers used by libSandy.
           git clone --depth 1 https://github.com/opa334/libSandy.git "$RUNNER_TEMP/libSandy-headers"
           git -C "$RUNNER_TEMP/libSandy-headers" fetch --depth 1 origin pull/6/head
           git -C "$RUNNER_TEMP/libSandy-headers" checkout --detach FETCH_HEAD
           mkdir -p "$RUNNER_TEMP/libSandy/headers"
-          # Only XPC headers are missing; preserve RootHide sandyd.h message IDs.
           cp -R "$RUNNER_TEMP/libSandy-headers/headers/xpc" "$RUNNER_TEMP/libSandy/headers/"
           make -C "$RUNNER_TEMP/libSandy" FINALPACKAGE=1 \
-            THEOS_PACKAGE_SCHEME=roothide ONLY_LIBRARY=1 ARCHS="arm64 arm64e"
+            THEOS_PACKAGE_SCHEME=roothide ONLY_LIBRARY=1 ARCHS="arm64"
           mkdir -p "$THEOS/lib/iphone/roothide"
           cp "$RUNNER_TEMP/libSandy/.theos/obj/libsandy.dylib" "$THEOS/lib/iphone/roothide/"
           cp "$RUNNER_TEMP/libSandy/libSandy.h" "$THEOS/include/"
@@ -54,24 +52,20 @@ jobs:
           set -euo pipefail
           git clone --depth 1 https://github.com/roothide/AltList.git "$RUNNER_TEMP/AltList"
           make -C "$RUNNER_TEMP/AltList" FINALPACKAGE=1 \
-            THEOS_PACKAGE_SCHEME=roothide ARCHS="arm64 arm64e"
+            THEOS_PACKAGE_SCHEME=roothide ARCHS="arm64"
           cp -R "$RUNNER_TEMP/AltList/.theos/obj/AltList.framework" "$THEOS/lib/iphone/roothide/"
 
-      - name: Build GeoShim with Xcode's native arm64e ABI
+      - name: Build GeoShim for iPhone X (arm64 RootHide)
         shell: bash
         run: |
           set -euo pipefail
-          # Only change the tweak architecture for this CI build.
-          # The CLI remains arm64; the preferences bundle can be universal.
-          sed -i '' 's/^ARCHS = arm64$/ARCHS = arm64e/' Makefile
-          # Pin the patched SDK: Apple's latest SDK lacks private Preferences.framework.
-          make clean TARGET=iphone:clang:16.5:15.0
-          make package TARGET=iphone:clang:16.5:15.0
-          xcrun lipo -info .theos/_/Library/MobileSubstrate/DynamicLibraries/GeoShim.dylib
+          make clean TARGET=iphone:clang:16.5:15.0 THEOS_PACKAGE_SCHEME=roothide ARCHS="arm64"
+          make package FINALPACKAGE=1 TARGET=iphone:clang:16.5:15.0 THEOS_PACKAGE_SCHEME=roothide ARCHS="arm64"
+          find .theos -name "GeoShim.dylib" -exec xcrun lipo -info {} +
 
       - name: Save installable deb
         uses: actions/upload-artifact@v4
         with:
-          name: GeoShim-native-arm64e
+          name: GeoShim-iPhoneX-arm64-roothide
           path: packages/*.deb
           if-no-files-found: error
